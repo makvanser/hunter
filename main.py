@@ -1,7 +1,9 @@
 """
-Hunter V12 — Main Loop
+Hunter V13 — Main Loop
 ========================
 Orchestrator: fetches REAL data from Binance Futures API → analyses → decides → executes.
+
+V13: Integrated NewsManager for sentiment-aware signal generation.
 
 Modes:
   - Auto Mode  :  python main.py             → scans top pairs in a loop
@@ -37,6 +39,7 @@ from analysis import (
     get_market_regime,
 )
 from execution import PaperTrader
+from news import NewsManager
 
 # ─────────────────────────────────────────────────────────────
 # Logging
@@ -65,7 +68,7 @@ def _api_get(endpoint: str, params: Optional[Dict] = None) -> any:
         qs = "&".join(f"{k}={v}" for k, v in params.items())
         url = f"{url}?{qs}"
 
-    req = urllib.request.Request(url, headers={"User-Agent": "HunterV12/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "HunterV13/1.0"})
     with urllib.request.urlopen(req, context=_ssl_ctx, timeout=15) as resp:
         return json.loads(resp.read().decode())
 
@@ -183,7 +186,7 @@ def scan_top_pairs(count: int = TOP_PAIRS_COUNT) -> List[str]:
 # ─────────────────────────────────────────────────────────────
 # Single Cycle (for one symbol)
 # ─────────────────────────────────────────────────────────────
-def run_cycle(trader: PaperTrader, symbol: str) -> Dict:
+def run_cycle(trader: PaperTrader, symbol: str, news_manager: NewsManager) -> Dict:
     """Execute one analysis-and-trade cycle for a given symbol."""
 
     logger.info("─" * 50)
@@ -227,11 +230,15 @@ def run_cycle(trader: PaperTrader, symbol: str) -> Dict:
     whale_vol = fetch_whale_net_volume(symbol)
     logger.info("   L/S Ratio=%.4f | Whale Net Vol=%.2f", ls_ratio, whale_vol)
 
-    # 5. Generate signal
-    signal = generate_signal(rsi, ls_ratio, whale_vol, regime)
+    # 5. News Sentiment (V13)
+    sentiment = news_manager.get_sentiment(symbol)
+    logger.info("   📰 News Sentiment = %s", sentiment)
+
+    # 6. Generate signal (V13: pass sentiment)
+    signal = generate_signal(rsi, ls_ratio, whale_vol, regime, sentiment)
     logger.info("   🎯 Signal = %s", signal)
 
-    # 6. Execute (multi-asset: pass symbol)
+    # 7. Execute (multi-asset: pass symbol)
     result = trader.execute_trade(signal, current_price, symbol)
     logger.info("   ➜ Result: %s", result["action"])
     return result
@@ -242,7 +249,7 @@ def run_cycle(trader: PaperTrader, symbol: str) -> Dict:
 # ─────────────────────────────────────────────────────────────
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Hunter V12 — Contrarian Crypto Trading Bot",
+        description="Hunter V13 — Contrarian Crypto Trading Bot",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -265,12 +272,18 @@ Examples:
 def run_manual(symbol: str) -> None:
     """Manual Mode: analyse one symbol, print results, exit."""
     logger.info("=" * 60)
-    logger.info("  HUNTER V12 — Manual Mode")
+    logger.info("  HUNTER V13 — Manual Mode")
     logger.info("  Symbol: %s", symbol)
     logger.info("=" * 60)
 
     trader = PaperTrader()
-    result = run_cycle(trader, symbol)
+    news_manager = NewsManager()
+
+    # Log Fear & Greed at startup
+    fng_value, fng_class = news_manager.get_fear_and_greed()
+    logger.info("  😱 Fear & Greed: %d (%s)", fng_value, fng_class)
+
+    result = run_cycle(trader, symbol, news_manager)
 
     logger.info("=" * 60)
     logger.info("  Result: %s", json.dumps(result, indent=2, default=str))
@@ -280,13 +293,18 @@ def run_manual(symbol: str) -> None:
 def run_auto() -> None:
     """Auto Mode: scan top pairs + held positions, loop forever."""
     logger.info("=" * 60)
-    logger.info("  HUNTER V12.1 — Auto Mode (Portfolio Aware)")
+    logger.info("  HUNTER V13 — Auto Mode (Portfolio Aware + News Sentiment)")
     logger.info("=" * 60)
 
     trader = PaperTrader()
+    news_manager = NewsManager()
 
     while True:
         try:
+            # Log Fear & Greed at the start of each cycle
+            fng_value, fng_class = news_manager.get_fear_and_greed()
+            logger.info("😱 Fear & Greed: %d (%s)", fng_value, fng_class)
+
             # 1. Get top market pairs by volume
             market_top = scan_top_pairs()
 
@@ -300,7 +318,7 @@ def run_auto() -> None:
 
             for sym in targets:
                 try:
-                    run_cycle(trader, sym)
+                    run_cycle(trader, sym, news_manager)
                     # Small pause between symbols to respect API rate limits
                     time.sleep(1)
                 except Exception as exc:

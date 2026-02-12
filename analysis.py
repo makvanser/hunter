@@ -1,13 +1,17 @@
 """
-Hunter V11 — Analysis Module
+Hunter V13 — Analysis Module
 ==============================
 Pure-function Technical Analysis calculations.
 No external data-fetching, no side-effects.
 
 Implements RSI, ADX, and Bollinger Bands from scratch
 (no TA-Lib C dependency required).
+
+V13: Added news_sentiment parameter to generate_signal()
+     with override logic for BULLISH/BEARISH news.
 """
 
+import logging
 from typing import List, Tuple
 
 from config import (
@@ -16,10 +20,13 @@ from config import (
     BB_PERIOD,
     BB_STD,
     LS_RATIO_THRESHOLD,
+    NEWS_OVERRIDE_RSI,
     RSI_OVERSOLD,
     RSI_PERIOD,
     WHALE_NET_VOL_MIN,
 )
+
+logger = logging.getLogger("hunter.analysis")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -168,13 +175,14 @@ def get_market_regime(adx_value: float) -> str:
 
 
 # ─────────────────────────────────────────────────────────────
-# Contrarian Signal Generator
+# Contrarian Signal Generator  (V13: + news_sentiment)
 # ─────────────────────────────────────────────────────────────
 def generate_signal(
     rsi: float,
     ls_ratio: float,
     whale_net_vol: float,
     regime: str,
+    news_sentiment: str = "NEUTRAL",
 ) -> str:
     """
     Contrarian signal logic (CoinBureau-inspired).
@@ -187,8 +195,28 @@ def generate_signal(
            AND Long/Short < 0.8  (crowd is shorting)
            AND Whale net vol > 0 (smart money buying)
 
+    V13 NEWS OVERRIDES (when NEWS_OVERRIDE_RSI is True):
+      - BULLISH news + RSI > 70 → suppress SELL → HOLD
+      - BEARISH news + RSI < 30 → suppress BUY  → HOLD
+
     Otherwise → HOLD.
     """
+    # ── V13: News override — suppress SELL on bullish news ──
+    if NEWS_OVERRIDE_RSI and news_sentiment == "BULLISH" and rsi > 70:
+        logger.info(
+            "🚀 BULLISH NEWS override: Ignoring Overbought signal (RSI=%.2f).",
+            rsi,
+        )
+        return "HOLD"
+
+    # ── V13: News override — suppress BUY on bearish news ──
+    if NEWS_OVERRIDE_RSI and news_sentiment == "BEARISH" and rsi < 30:
+        logger.info(
+            "⚠️ BEARISH NEWS override: Ignoring Oversold signal (RSI=%.2f).",
+            rsi,
+        )
+        return "HOLD"
+
     # ── Sell: EXIT is always allowed (even in CHOPPY) ──
     if rsi > 70:
         return "SELL"
@@ -205,4 +233,3 @@ def generate_signal(
         return "BUY"
 
     return "HOLD"
-

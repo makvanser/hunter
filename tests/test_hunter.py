@@ -1,8 +1,9 @@
 """
-Hunter V12.1 — Test Suite
+Hunter V13 — Test Suite
 ===========================
 Covers RSI, ADX regime, contrarian signals, circuit breaker,
-PnL USD, multi-asset portfolio, and config blacklist.
+PnL USD, multi-asset portfolio, config blacklist,
+and V13 news sentiment overrides.
 """
 
 import math
@@ -290,3 +291,63 @@ class TestConfig:
 
     def test_btcusdt_not_blacklisted(self):
         assert "BTCUSDT" not in BLACKLIST
+
+
+# ─────────────────────────────────────────────────────────────
+# News Sentiment Override Tests (V13)
+# ─────────────────────────────────────────────────────────────
+class TestNewsSentiment:
+    """Test that news sentiment correctly overrides RSI-based signals."""
+
+    def test_bullish_overrides_sell(self):
+        """RSI > 70 normally → SELL, but BULLISH news → HOLD."""
+        sig = generate_signal(
+            rsi=80, ls_ratio=1.2, whale_net_vol=0,
+            regime="TRENDING", news_sentiment="BULLISH",
+        )
+        assert sig == "HOLD", f"BULLISH news should override SELL, got {sig}"
+
+    def test_bearish_overrides_buy(self):
+        """Oversold + all BUY conditions met, but BEARISH news → HOLD."""
+        sig = generate_signal(
+            rsi=25, ls_ratio=0.6, whale_net_vol=100,
+            regime="TRENDING", news_sentiment="BEARISH",
+        )
+        assert sig == "HOLD", f"BEARISH news should override BUY, got {sig}"
+
+    def test_neutral_does_not_override_sell(self):
+        """NEUTRAL news should not change normal SELL on overbought."""
+        sig = generate_signal(
+            rsi=80, ls_ratio=1.2, whale_net_vol=0,
+            regime="TRENDING", news_sentiment="NEUTRAL",
+        )
+        assert sig == "SELL", f"NEUTRAL should not override, got {sig}"
+
+    def test_neutral_does_not_override_buy(self):
+        """NEUTRAL news should not change normal BUY on oversold."""
+        sig = generate_signal(
+            rsi=25, ls_ratio=0.6, whale_net_vol=100,
+            regime="TRENDING", news_sentiment="NEUTRAL",
+        )
+        assert sig == "BUY", f"NEUTRAL should not override, got {sig}"
+
+    def test_default_backward_compat(self):
+        """Calling without news_sentiment (4-arg style) still works."""
+        sig = generate_signal(rsi=80, ls_ratio=1.2, whale_net_vol=0, regime="TRENDING")
+        assert sig == "SELL", "Default 4-arg call must still return SELL"
+
+    def test_bullish_does_not_affect_non_overbought(self):
+        """BULLISH news only overrides when RSI > 70 (overbought)."""
+        sig = generate_signal(
+            rsi=50, ls_ratio=0.6, whale_net_vol=100,
+            regime="TRENDING", news_sentiment="BULLISH",
+        )
+        assert sig == "HOLD", f"BULLISH with RSI=50 should be HOLD, got {sig}"
+
+    def test_bearish_does_not_affect_non_oversold(self):
+        """BEARISH news only overrides when RSI < 30 (oversold)."""
+        sig = generate_signal(
+            rsi=50, ls_ratio=0.6, whale_net_vol=100,
+            regime="TRENDING", news_sentiment="BEARISH",
+        )
+        assert sig == "HOLD", f"BEARISH with RSI=50 should be HOLD, got {sig}"

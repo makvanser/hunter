@@ -1,5 +1,5 @@
 """
-Hunter V12 — Configuration Constants
+Hunter V13 — Configuration Constants
 =====================================
 Central place for every tunable parameter.
 """
@@ -53,3 +53,8 @@ INITIAL_BALANCE_USD = 10_000
 # ── Infrastructure ───────────────────────────────────────────
 DB_PATH = "hunter.db"
 CHECK_INTERVAL_SEC = 300     # 5 minutes
+
+# ── News Sentiment Layer (V13) ───────────────────────────────
+CRYPTOPANIC_API_KEY = "c12917daf988840356e4bd7f5bacfb060a6e9353"   # Fill with your key
+NEWS_OVERRIDE_RSI = True                    # Allow news to override RSI signals
+NEWS_POLL_INTERVAL_SEC = 900                # 15 minutes (CryptoPanic free tier)

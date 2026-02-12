@@ -1,5 +1,5 @@
 """
-Hunter V13 — Configuration Constants
+Hunter V13 — Configuration Constants (Updated for V2 API)
 =====================================
 Central place for every tunable parameter.
 """

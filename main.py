@@ -1,45 +1,63 @@
 """
-Hunter V13 — Main Loop
+Hunter V17 — Main Loop
 ========================
-Orchestrator: fetches REAL data from Binance Futures API → analyses → decides → executes.
+Orchestrator: fetches asynchronous data via BinanceProvider → analyses → decides → executes.
 
-V13: Integrated NewsManager for sentiment-aware signal generation.
-
-Modes:
-  - Auto Mode  :  python main.py             → scans top pairs in a loop
-  - Manual Mode:  python main.py --symbol ETHUSDT  → single analysis, then exit
+V17: Async I/O refactoring, MarketState dataclass to fix parameter bloat.
+V16: Persistence, Kelly Criterion, fees, StochRSI, Vol confirm.
+V15: Short positions, funding rate sentiment, trailing SL.
+V14: Multi-Timeframe analysis, MACD/ATR/VWAP indicators.
 """
 
 import argparse
-import json
+import asyncio
+import inspect
 import logging
-import ssl
-import sys
 import time
-import urllib.request
-import urllib.error
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 
 from config import (
-    BASE_URL,
-    BLACKLIST,
-    CHECK_INTERVAL_SEC,
-    TIMEFRAME,
-    KLINE_LIMIT,
-    TOP_PAIRS_COUNT,
     ADX_PERIOD,
-    RSI_PERIOD,
+    ATR_PERIOD,
     BB_PERIOD,
+    CHECK_INTERVAL_SEC,
+    LIVE_TRADING,
+    MACD_FAST,
+    MACD_SIGNAL,
+    MACD_SLOW,
+    MTF_AGREEMENT_MIN,
+    MULTI_TF_INTERVALS,
+    TIMEFRAME,
+    RSI_PERIOD,
+    SR_LOOKBACK,
+    SR_PROXIMITY_PCT,
+    VOLUME_CONFIRM_BARS,
+    VOLUME_CONFIRM_ENABLED,
+    VWAP_BARS,
 )
 from analysis import (
+    MarketState,
     compute_adx,
+    compute_atr,
     compute_bollinger,
+    compute_macd,
     compute_rsi,
+    compute_rsi_series,
+    compute_rsi_slope,
+    compute_stoch_rsi,
+    compute_support_resistance,
+    compute_vwap,
+    detect_divergence,
     generate_signal,
     get_market_regime,
 )
 from execution import PaperTrader
-from news import NewsManager
+from live_execution import LiveTrader
+from social import SocialManager
+from macro import MacroManager
+from ml import MLFilter
+from provider import BinanceProvider
+from report import ReportGenerator
 
 # ─────────────────────────────────────────────────────────────
 # Logging
@@ -51,153 +69,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger("hunter.main")
 
-# Reusable SSL context (Binance requires TLS)
-_ssl_ctx = ssl.create_default_context()
-
-
 # ─────────────────────────────────────────────────────────────
-# HTTP helper
+# Single Cycle (for one symbol)  — V17 Async
 # ─────────────────────────────────────────────────────────────
-def _api_get(endpoint: str, params: Optional[Dict] = None) -> any:
-    """
-    GET request to Binance Futures API.
-    Returns parsed JSON.
-    """
-    url = f"{BASE_URL}{endpoint}"
-    if params:
-        qs = "&".join(f"{k}={v}" for k, v in params.items())
-        url = f"{url}?{qs}"
-
-    req = urllib.request.Request(url, headers={"User-Agent": "HunterV13/1.0"})
-    with urllib.request.urlopen(req, context=_ssl_ctx, timeout=15) as resp:
-        return json.loads(resp.read().decode())
-
-
-# ─────────────────────────────────────────────────────────────
-# Real Data Fetching
-# ─────────────────────────────────────────────────────────────
-def fetch_real_ohlcv(
-    symbol: str,
-    interval: str = TIMEFRAME,
-    limit: int = KLINE_LIMIT,
-) -> Tuple[List[float], List[float], List[float], List[float]]:
-    """
-    Fetch OHLCV candles from Binance Futures /fapi/v1/klines.
-
-    Returns (highs, lows, closes, volumes) as lists of floats.
-    Raises on network / API error.
-    """
-    data = _api_get("/fapi/v1/klines", {
-        "symbol": symbol,
-        "interval": interval,
-        "limit": str(limit),
-    })
-
-    # Kline format: [openTime, open, high, low, close, volume, ...]
-    highs   = [float(k[2]) for k in data]
-    lows    = [float(k[3]) for k in data]
-    closes  = [float(k[4]) for k in data]
-    volumes = [float(k[5]) for k in data]
-
-    return highs, lows, closes, volumes
-
-
-def fetch_long_short_ratio(symbol: str) -> float:
-    """
-    Fetch the global Long/Short account ratio from Binance Futures.
-    Endpoint: /futures/data/globalLongShortAccountRatio
-
-    Returns the latest ratio as a float (< 1 means more shorts).
-    Falls back to 1.0 on error (neutral).
-    """
-    try:
-        data = _api_get("/futures/data/globalLongShortAccountRatio", {
-            "symbol": symbol,
-            "period": "1h",
-            "limit": "1",
-        })
-        if data:
-            return float(data[0]["longShortRatio"])
-    except Exception as exc:
-        logger.warning("⚠️  L/S ratio fetch failed for %s: %s", symbol, exc)
-    return 1.0  # Neutral fallback
-
-
-def fetch_whale_net_volume(symbol: str) -> float:
-    """
-    Approximate whale activity using Binance Futures taker buy/sell volume.
-    Endpoint: /futures/data/takerlongshortRatio
-
-    whale_proxy = takerBuyVol - takerSellVol
-    Positive = net buying pressure (bullish whale proxy).
-    Falls back to 0.0 on error (neutral).
-    """
-    try:
-        data = _api_get("/futures/data/takerlongshortRatio", {
-            "symbol": symbol,
-            "period": "1h",
-            "limit": "1",
-        })
-        if data:
-            buy_vol  = float(data[0].get("buyVol", 0))
-            sell_vol = float(data[0].get("sellVol", 0))
-            return buy_vol - sell_vol
-    except Exception as exc:
-        logger.warning("⚠️  Whale volume fetch failed for %s: %s", symbol, exc)
-    return 0.0  # Neutral fallback
-
-
-# ─────────────────────────────────────────────────────────────
-# Dynamic Pair Scanner
-# ─────────────────────────────────────────────────────────────
-def scan_top_pairs(count: int = TOP_PAIRS_COUNT) -> List[str]:
-    """
-    Fetch the top USDT-margined futures pairs by 24h quote volume.
-
-    Steps:
-    1. GET /fapi/v1/ticker/24hr  → all tickers
-    2. Filter to *USDT pairs only
-    3. Remove blacklisted stablecoins
-    4. Sort by quoteVolume descending
-    5. Return top `count` symbols
-    """
-    logger.info("🔍 Scanning top %d futures pairs by 24h volume …", count)
-    try:
-        tickers = _api_get("/fapi/v1/ticker/24hr")
-    except Exception as exc:
-        logger.error("❌ Failed to fetch tickers: %s", exc)
-        return ["BTCUSDT"]  # Safe fallback
-
-    # Filter USDT pairs, exclude blacklist
-    usdt_pairs = [
-        t for t in tickers
-        if t["symbol"].endswith("USDT")
-        and t["symbol"] not in BLACKLIST
-    ]
-
-    # Sort by 24h quote volume (descending)
-    usdt_pairs.sort(key=lambda t: float(t.get("quoteVolume", 0)), reverse=True)
-
-    top = [t["symbol"] for t in usdt_pairs[:count]]
-    logger.info("📋 Top pairs: %s", ", ".join(top))
-    return top
-
-
-# ─────────────────────────────────────────────────────────────
-# Single Cycle (for one symbol)
-# ─────────────────────────────────────────────────────────────
-def run_cycle(trader: PaperTrader, symbol: str, news_manager: NewsManager) -> Dict:
-    """Execute one analysis-and-trade cycle for a given symbol."""
-
-    logger.info("─" * 50)
+async def run_cycle(
+    trader, 
+    symbol: str,  
+    social_manager: SocialManager, 
+    macro_manager: MacroManager,
+    provider: BinanceProvider,
+    prefetched_data: Dict = None,
+    ml_filter: MLFilter = None,
+) -> Dict:
+    """Execute one analysis-and-trade cycle asynchronously for a given symbol."""
+    logger.info("─" * 60)
     logger.info("▶ Analysing %s", symbol)
 
-    # 1. Fetch real candles
-    try:
-        highs, lows, closes, volumes = fetch_real_ohlcv(symbol)
-    except Exception as exc:
-        logger.error("❌ OHLCV fetch failed for %s: %s", symbol, exc)
-        return {"action": "FETCH_ERROR", "symbol": symbol, "error": str(exc)}
+    # 1. Fetch ALL data concurrently or use WSS cache
+    if prefetched_data:
+        data = prefetched_data
+    else:
+        try:
+            data = await provider.fetch_all_market_data(symbol, MULTI_TF_INTERVALS)
+        except Exception as exc:
+            logger.error("❌ Data fetch failed for %s: %s", symbol, exc)
+            return {"action": "FETCH_ERROR", "symbol": symbol, "error": str(exc)}
+
+    highs, lows, closes, volumes = data["highs"], data["lows"], data["closes"], data["volumes"]
+    if not closes:
+        return {"action": "FETCH_ERROR", "symbol": symbol, "error": "Empty OHLCV"}
 
     current_price = closes[-1]
 
@@ -209,6 +109,14 @@ def run_cycle(trader: PaperTrader, symbol: str, news_manager: NewsManager) -> Di
     )
 
     if regime == "CHOPPY":
+        # Even in CHOPPY, check SL/TP for open positions
+        if trader.has_position(symbol):
+            atr = compute_atr(highs, lows, closes, ATR_PERIOD)
+            result = trader.execute_trade("HOLD", current_price, symbol, atr=atr)
+            if result["action"] in ("CLOSED_SL", "CLOSED_TP"):
+                logger.info("   ⚡ SL/TP triggered in CHOPPY market for %s", symbol)
+                return result
+
         logger.info("⏸️  Market is CHOPPY (ADX < 25) — skipping %s", symbol)
         return {
             "action": "SKIP_CHOPPY",
@@ -220,130 +128,232 @@ def run_cycle(trader: PaperTrader, symbol: str, news_manager: NewsManager) -> Di
 
     # 3. Compute indicators
     rsi = compute_rsi(closes, RSI_PERIOD)
-    upper, middle, lower = compute_bollinger(closes, BB_PERIOD)
-    logger.info(
-        "   RSI=%.2f | BB=[%.2f / %.2f / %.2f]", rsi, lower, middle, upper
+    lower, middle, upper = compute_bollinger(closes, BB_PERIOD)
+    logger.info("   RSI=%.2f | BB=[%.2f / %.2f / %.2f]", rsi, lower, middle, upper)
+
+    macd_line, signal_line, histogram = compute_macd(closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+    logger.info("   MACD: line=%.4f | signal=%.4f | hist=%.4f", macd_line, signal_line, histogram)
+
+    atr = compute_atr(highs, lows, closes, ATR_PERIOD)
+    logger.info("   ATR=%.4f", atr)
+
+    vwap_start = max(0, len(closes) - VWAP_BARS)
+    vwap = compute_vwap(highs[vwap_start:], lows[vwap_start:], closes[vwap_start:], volumes[vwap_start:])
+    vwap_diff_pct = ((current_price - vwap) / vwap * 100) if vwap > 0 else 0
+    logger.info("   VWAP=%.4f (price %+.2f%%) [bars=%d]", vwap, vwap_diff_pct, VWAP_BARS)
+
+    rsi_slope = compute_rsi_slope(closes)
+    stoch_rsi = compute_stoch_rsi(closes)
+
+    rsi_series = compute_rsi_series(closes, RSI_PERIOD)
+    divergence = detect_divergence(closes, rsi_series, adx_value=adx)
+
+    supports, resistances = compute_support_resistance(highs, lows, SR_LOOKBACK)
+    near_support = any(abs(current_price - s) / current_price * 100 < SR_PROXIMITY_PCT for s in supports)
+    near_resistance = any(abs(current_price - r) / current_price * 100 < SR_PROXIMITY_PCT for r in resistances)
+    
+    if supports:
+        logger.info("   🟢 Supports: %s %s", [f"${s:.2f}" for s in supports[-3:]], "← NEAR!" if near_support else "")
+    if resistances:
+        logger.info("   🔴 Resistances: %s %s", [f"${r:.2f}" for r in resistances[-3:]], "← NEAR!" if near_resistance else "")
+
+    ls_ratio = data["ls_ratio"]
+    whale_vol = data["whale_vol"]
+    funding_rate = data["funding_rate"]
+    oi_delta = data["oi_delta"]
+    liq_imbalance = data["liq_imbalance"]
+
+    volume_confirm = True
+    if VOLUME_CONFIRM_ENABLED and len(volumes) >= VOLUME_CONFIRM_BARS * 2:
+        recent_vol = sum(volumes[-VOLUME_CONFIRM_BARS:])
+        prev_vol = sum(volumes[-(VOLUME_CONFIRM_BARS * 2):-VOLUME_CONFIRM_BARS])
+        volume_confirm = recent_vol > prev_vol
+            
+    # 5. Social & Sentiment Score
+    social_score = social_manager.get_social_score(symbol)
+
+    btc_dom = await macro_manager.get_btc_dominance()
+    btc_corr = await macro_manager.get_btc_correlation(symbol, provider)
+
+    # 6. Compute MTF Agreement
+    mtf_scores = []
+    for tf, tf_closes in data["mtf_closes"].items():
+        if tf_closes:
+            tf_rsi = compute_rsi(tf_closes, RSI_PERIOD)
+            score = 1.0 - 2.0 * (tf_rsi - 30.0) / (70.0 - 30.0)
+            mtf_scores.append(max(-1.0, min(1.0, score)))
+        else:
+            mtf_scores.append(0.0)
+            
+    mtf_agreement = sum(mtf_scores) / len(mtf_scores) if mtf_scores else 0.0
+
+    bb_range = upper - lower
+    bb_position = (current_price - lower) / bb_range if bb_range > 0 else 0.5
+
+    # 7. Create MarketState (V17 refactoring)
+    atr_pct = (atr / current_price * 100) if current_price else 0.0
+    market_state = MarketState(
+        current_price=current_price,
+        rsi=rsi,
+        ls_ratio=ls_ratio,
+        whale_net_vol=whale_vol,
+        regime=regime,
+        social_score=social_score,
+        macd_histogram=histogram,
+        bb_position=bb_position,
+        vwap_diff_pct=vwap_diff_pct,
+        divergence=divergence,
+        funding_rate=funding_rate,
+        open_interest_delta=oi_delta,
+        liq_imbalance=liq_imbalance,
+        atr_pct=atr_pct,
+        rsi_slope=rsi_slope,
+        stoch_rsi=stoch_rsi,
+        mtf_agreement=mtf_agreement,
+        volume_confirm=volume_confirm,
+        near_resistance=near_resistance,
+        btc_correlation=btc_corr,
+        btc_dominance=btc_dom
     )
 
-    # 4. External data (real Binance)
-    ls_ratio = fetch_long_short_ratio(symbol)
-    whale_vol = fetch_whale_net_volume(symbol)
-    logger.info("   L/S Ratio=%.4f | Whale Net Vol=%.2f", ls_ratio, whale_vol)
+    # 8. Generate signal
+    pos = trader.get_position(symbol)
+    signal_dict = generate_signal(market_state, current_position=pos, use_composite=True, detailed=True)
 
-    # 5. News Sentiment (V13)
-    sentiment = news_manager.get_sentiment(symbol)
-    logger.info("   📰 News Sentiment = %s", sentiment)
+    # 8.5 ML Filter Gate (V22 Phase 6)
+    action = signal_dict.get("action", "HOLD")
+    if action not in ("HOLD", "DCA_BUY", "DCA_SHORT") and ml_filter is not None:
+        if not ml_filter.should_trade(market_state, 
+                                       composite_score=signal_dict.get("composite_score", 0),
+                                       closes=closes, volumes=volumes,
+                                       hour=datetime.now(timezone.utc).hour):
+            action = "HOLD"  # ML blocked this signal
 
-    # 6. Generate signal (V13: pass sentiment)
-    signal = generate_signal(rsi, ls_ratio, whale_vol, regime, sentiment)
-    logger.info("   🎯 Signal = %s", signal)
-
-    # 7. Execute (multi-asset: pass symbol)
-    result = trader.execute_trade(signal, current_price, symbol)
-    logger.info("   ➜ Result: %s", result["action"])
+    # 9. Execute
+    result = trader.execute_trade(action, current_price, symbol, atr=atr)
+    if inspect.iscoroutine(result):
+        result = await result
+    
+    # 10. Generate beautiful Report
+    ReportGenerator.print_cycle_report(symbol, market_state, signal_dict, result)
+    
     return result
 
 
-# ─────────────────────────────────────────────────────────────
-# CLI Argument Parser
-# ─────────────────────────────────────────────────────────────
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Hunter V13 — Contrarian Crypto Trading Bot",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python main.py                     Auto mode — scan top pairs in loop
-  python main.py --symbol ETHUSDT    Manual mode — single analysis & exit
-        """,
-    )
-    parser.add_argument(
-        "--symbol", "-s",
-        type=str,
-        default=None,
-        help="Run a SINGLE analysis for this symbol and exit (Manual Mode).",
-    )
-    return parser.parse_args()
-
-
-# ─────────────────────────────────────────────────────────────
-# Entry Points
-# ─────────────────────────────────────────────────────────────
-def run_manual(symbol: str) -> None:
+async def run_manual(symbol: str):
     """Manual Mode: analyse one symbol, print results, exit."""
-    logger.info("=" * 60)
-    logger.info("  HUNTER V13 — Manual Mode")
+    logger.info("==============================================")
+    logger.info("  HUNTER V17 — Manual Mode (Async)")
     logger.info("  Symbol: %s", symbol)
-    logger.info("=" * 60)
+    logger.info("==============================================")
 
-    trader = PaperTrader()
-    news_manager = NewsManager()
+    trader = LiveTrader() if LIVE_TRADING else PaperTrader()
+    social_manager = SocialManager()
+    macro_manager = MacroManager()
+    
+    async with BinanceProvider() as provider:
+        fear_greed = social_manager.news_manager.get_fear_and_greed()
+        logger.info(
+            "  😱 Fear & Greed: %s (%s)",
+            fear_greed[0],
+            fear_greed[1],
+        )
 
-    # Log Fear & Greed at startup
-    fng_value, fng_class = news_manager.get_fear_and_greed()
-    logger.info("  😱 Fear & Greed: %d (%s)", fng_value, fng_class)
+        result = await run_cycle(trader, symbol, social_manager, macro_manager, provider, ml_filter=None)
 
-    result = run_cycle(trader, symbol, news_manager)
-
-    logger.info("=" * 60)
-    logger.info("  Result: %s", json.dumps(result, indent=2, default=str))
-    logger.info("=" * 60)
+        logger.info("==============================================")
+        logger.info("  Result: %s", json.dumps(result, indent=2) if isinstance(result, dict) else result)
+        logger.info("==============================================")
 
 
-def run_auto() -> None:
-    """Auto Mode: scan top pairs + held positions, loop forever."""
-    logger.info("=" * 60)
-    logger.info("  HUNTER V13 — Auto Mode (Portfolio Aware + News Sentiment)")
-    logger.info("=" * 60)
-
-    trader = PaperTrader()
-    news_manager = NewsManager()
-
+async def run_pair_wss(symbol: str, provider: BinanceProvider, trader, social_manager: SocialManager, macro_manager: MacroManager, ml_filter: MLFilter = None):
+    """Handles persistent WSS stream for a specific pair."""
+    logger.info("📡 Starting Zero-Latency WSS listener for %s", symbol)
     while True:
         try:
-            # Log Fear & Greed at the start of each cycle
-            fng_value, fng_class = news_manager.get_fear_and_greed()
-            logger.info("😱 Fear & Greed: %d (%s)", fng_value, fng_class)
+            # Prime data via REST
+            data = await provider.fetch_all_market_data(symbol, MULTI_TF_INTERVALS)
+            
+            async for kline in provider.stream_klines(symbol, TIMEFRAME):
+                if kline.get('x'): # Candle closed
+                    # 1. Update strictly needed OHLCV arrays instantly
+                    data['highs'].pop(0); data['highs'].append(float(kline['h']))
+                    data['lows'].pop(0);  data['lows'].append(float(kline['l']))
+                    data['closes'].pop(0); data['closes'].append(float(kline['c']))
+                    data['volumes'].pop(0); data['volumes'].append(float(kline['v']))
+                    
+                    # 2. Zero-latency execution using the cached auxiliary data!
+                    await run_cycle(trader, symbol, social_manager, macro_manager, provider, prefetched_data=data, ml_filter=ml_filter)
+                    
+                    # 3. Refresh auxiliary data AFTER execution so it's ready for the next candle!
+                    aux = await provider.fetch_all_market_data(symbol, MULTI_TF_INTERVALS)
+                    data.update({k: v for k, v in aux.items() if k not in ['highs', 'lows', 'closes', 'volumes']})
+                    
+        except asyncio.CancelledError:
+            logger.info("🛑 WSS Loop cancelled for %s", symbol)
+            break
+        except Exception as e:
+            logger.error("❌ WSS Crash on %s: %s. Restarting...", symbol, e)
+            await asyncio.sleep(5)
 
-            # 1. Get top market pairs by volume
-            market_top = scan_top_pairs()
+async def run_auto():
+    """Auto Mode: scan top pairs + held positions, loop over them asynchronously."""
+    logger.info("==============================================")
+    logger.info("  HUNTER V19 — WSS Auto Mode Started")
+    logger.info("==============================================")
 
-            # 2. Merge with currently held positions (so we never abandon them)
-            portfolio_symbols = list(trader.positions.keys())
+    trader = LiveTrader() if LIVE_TRADING else PaperTrader()
+    social_manager = SocialManager()
+    macro_manager = MacroManager()
+    ml_filter = MLFilter()
+    ml_filter.load()  # Load pre-trained model if available
 
-            # 3. Deduplicate via set
-            targets = list(set(market_top + portfolio_symbols))
+    # V22: Sync real exchange balance before any trades
+    if LIVE_TRADING and hasattr(trader, 'sync_balance'):
+        import asyncio as _aio
+        bal = await trader.sync_balance()
+        logger.info("💰 Exchange balance synced: $%.2f", bal)
 
-            logger.info("📋 Cycle targets (%d): %s", len(targets), ", ".join(targets))
+    async with BinanceProvider() as provider:
+        fg = social_manager.news_manager.get_fear_and_greed()
+        logger.info("Global F&G Index: %s (%s)", fg[0], fg[1])
 
-            for sym in targets:
-                try:
-                    run_cycle(trader, sym, news_manager)
-                    # Small pause between symbols to respect API rate limits
-                    time.sleep(1)
-                except Exception as exc:
-                    logger.exception("Error analysing %s: %s", sym, exc)
+        try:
+            top_pairs = await provider.scan_top_pairs()
+            
+            # Active positions must always be monitored
+            for sym in trader.positions.keys():
+                if sym not in top_pairs:
+                    top_pairs.append(sym)
+            
+            logger.info("🎯 Starting WSS auto mode for %d pairs: %s", len(top_pairs), top_pairs)
+            
+            # Run persistent WSS tasks concurrently indefinitely
+            tasks = [run_pair_wss(sym, provider, trader, social_manager, macro_manager, ml_filter) for sym in top_pairs]
+            await asyncio.gather(*tasks)
 
-        except KeyboardInterrupt:
-            logger.info("🛑 Shutting down gracefully …")
-            sys.exit(0)
         except Exception as exc:
-            logger.exception("Unhandled error in auto-cycle: %s", exc)
-
-        logger.info(
-            "💤 Sleeping %d seconds before next scan …\n", CHECK_INTERVAL_SEC
-        )
-        time.sleep(CHECK_INTERVAL_SEC)
+            logger.error("❌ Unhandled exception in main setup: %s", exc)
+            await asyncio.sleep(5)
 
 
-def main() -> None:
-    args = parse_args()
+async def main():
+    parser = argparse.ArgumentParser(description="Hunter V17 Trading Bot")
+    parser.add_argument("--symbol", type=str, help="Run single analysis for a pair (e.g. BTCUSDT)")
+    args = parser.parse_args()
 
     if args.symbol:
-        run_manual(args.symbol.upper())
+        await run_manual(args.symbol.upper())
     else:
-        run_auto()
+        await run_auto()
 
 
 if __name__ == "__main__":
-    main()
+    import json
+    # Run asyncio event loop
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("🛑 Bot stopped by user. Graceful shutdown.")
+    except Exception as e:
+        logger.error("🛑 Fatal execution error: %s", e)

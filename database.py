@@ -1,13 +1,17 @@
 """
-Hunter V11 — Database Module
+Hunter V16 — Database Module
 ==============================
 SQLite-backed trade journal + circuit-breaker state management.
 Tracks every trade outcome and enforces the 3-consecutive-loss cooldown.
+
+V14: Added `symbol` column to trades table for per-instrument analytics.
+V16: Added `positions` table for persistence across restarts.
+     Added get_trade_stats() for Kelly Criterion position sizing.
 """
 
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Dict, List, Optional
 
 from config import DB_PATH, MAX_CONSECUTIVE_LOSSES, COOLDOWN_HOURS
 
@@ -24,13 +28,42 @@ def init_db(db_path: str = DB_PATH) -> None:
         CREATE TABLE IF NOT EXISTS trades (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp   TEXT    NOT NULL,
-            side        TEXT    NOT NULL,   -- BUY / SELL
+            symbol      TEXT    NOT NULL DEFAULT 'UNKNOWN',
+            side        TEXT    NOT NULL,
             price       REAL    NOT NULL,
             size_usd    REAL    NOT NULL,
             pnl         REAL    DEFAULT 0,
             status      TEXT    DEFAULT 'OPEN'
         )
     """)
+
+    # V14 migration: add symbol column if it doesn't exist (for older DBs)
+    try:
+        c.execute("ALTER TABLE trades ADD COLUMN symbol TEXT NOT NULL DEFAULT 'UNKNOWN'")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
+    # V16: Persistent positions table — survives bot restarts
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS positions (
+            symbol      TEXT    PRIMARY KEY,
+            side        TEXT    NOT NULL,
+            entry       REAL    NOT NULL,
+            size_usd    REAL    NOT NULL,
+            stop_loss   REAL,
+            take_profit REAL,
+            trail_high  REAL,
+            trail_low   REAL,
+            opened_at   TEXT    NOT NULL,
+            dca_count   INTEGER DEFAULT 0
+        )
+    """)
+
+    # V19 migration: add dca_count column for older DBs
+    try:
+        c.execute("ALTER TABLE positions ADD COLUMN dca_count INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS state (
@@ -62,10 +95,10 @@ def log_trade(
     size_usd: float,
     pnl: float,
     db_path: str = DB_PATH,
+    symbol: str = "UNKNOWN",
 ) -> int:
     """
     Record a completed trade and update the consecutive-loss counter.
-
     Returns the trade row id.
     """
     conn = sqlite3.connect(db_path)
@@ -73,9 +106,9 @@ def log_trade(
 
     now = datetime.now(timezone.utc).isoformat()
     c.execute(
-        "INSERT INTO trades (timestamp, side, price, size_usd, pnl, status) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (now, side, price, size_usd, pnl, "CLOSED"),
+        "INSERT INTO trades (timestamp, symbol, side, price, size_usd, pnl, status) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (now, symbol, side, price, size_usd, pnl, "CLOSED"),
     )
     trade_id = c.lastrowid
 
@@ -83,18 +116,127 @@ def log_trade(
     if pnl < 0:
         losses = _get_state_int(c, "consecutive_losses") + 1
         _set_state(c, "consecutive_losses", str(losses))
-
-        # Trip the circuit breaker if threshold is reached
         if losses >= MAX_CONSECUTIVE_LOSSES:
             cooldown_end = datetime.now(timezone.utc) + timedelta(hours=COOLDOWN_HOURS)
             _set_state(c, "cooldown_until", cooldown_end.isoformat())
     else:
-        # A win (or break-even) resets the streak
         _set_state(c, "consecutive_losses", "0")
 
     conn.commit()
     conn.close()
     return trade_id
+
+
+# ─────────────────────────────────────────────────────────────
+# Persistent Positions  (V16)
+# ─────────────────────────────────────────────────────────────
+def save_position(symbol: str, pos: Dict, db_path: str = DB_PATH) -> None:
+    """Upsert an open position so it survives restarts."""
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute(
+        """INSERT OR REPLACE INTO positions
+           (symbol, side, entry, size_usd, stop_loss, take_profit,
+            trail_high, trail_low, opened_at, dca_count)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            symbol,
+            pos["side"],
+            pos["entry"],
+            pos["size_usd"],
+            pos.get("stop_loss"),
+            pos.get("take_profit"),
+            pos.get("trail_high"),
+            pos.get("trail_low"),
+            pos.get("opened_at", datetime.now(timezone.utc).isoformat()),
+            pos.get("dca_count", 0),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_positions(db_path: str = DB_PATH) -> Dict[str, Dict]:
+    """Load all open positions from DB on startup."""
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute(
+        "SELECT symbol, side, entry, size_usd, stop_loss, take_profit, "
+        "trail_high, trail_low, opened_at, dca_count FROM positions"
+    )
+    rows = c.fetchall()
+    conn.close()
+
+    positions = {}
+    for r in rows:
+        positions[r[0]] = {
+            "side": r[1],
+            "entry": r[2],
+            "size_usd": r[3],
+            "stop_loss": r[4],
+            "take_profit": r[5],
+            "trail_high": r[6],
+            "trail_low": r[7],
+            "opened_at": r[8],
+            "dca_count": r[9],
+        }
+    return positions
+
+    result = {}
+    for row in rows:
+        sym, side, entry, size_usd, sl, tp, th, tl, opened_at = row
+        result[sym] = {
+            "side": side,
+            "entry": entry,
+            "size_usd": size_usd,
+            "stop_loss": sl,
+            "take_profit": tp,
+            "trail_high": th,
+            "trail_low": tl,
+            "opened_at": opened_at,
+        }
+    return result
+
+
+def delete_position(symbol: str, db_path: str = DB_PATH) -> None:
+    """Remove a closed position from the DB."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("DELETE FROM positions WHERE symbol = ?", (symbol,))
+    conn.commit()
+    conn.close()
+
+
+# ─────────────────────────────────────────────────────────────
+# Trade Statistics — for Kelly Criterion  (V16)
+# ─────────────────────────────────────────────────────────────
+def get_trade_stats(db_path: str = DB_PATH, n_recent: int = 50) -> Dict:
+    """
+    Compute win-rate, avg_win, avg_loss over last n_recent closed trades.
+
+    Returns dict with keys: n_trades, win_rate, avg_win, avg_loss.
+    """
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute(
+        "SELECT pnl FROM trades WHERE status='CLOSED' ORDER BY id DESC LIMIT ?",
+        (n_recent,),
+    )
+    rows = c.fetchall()
+    conn.close()
+
+    if not rows:
+        return {"n_trades": 0, "win_rate": 0.5, "avg_win": 1.0, "avg_loss": 1.0}
+
+    pnls   = [r[0] for r in rows]
+    wins   = [p for p in pnls if p > 0]
+    losses = [abs(p) for p in pnls if p < 0]
+
+    return {
+        "n_trades": len(pnls),
+        "win_rate": len(wins) / len(pnls),
+        "avg_win":  sum(wins)   / len(wins)   if wins   else 1.0,
+        "avg_loss": sum(losses) / len(losses) if losses else 1.0,
+    }
 
 
 # ─────────────────────────────────────────────────────────────

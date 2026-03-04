@@ -159,4 +159,3 @@ SR_PROXIMITY_PCT = 0.5       # V16: used to block BUY near resistance
 
 # ── VWAP (V16) ───────────────────────────────────────────────
 VWAP_BARS = 24               # V16: use last 24 bars (≈1 trading day) for VWAP
-

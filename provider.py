@@ -30,6 +30,7 @@ class BinanceProvider:
     def __init__(self):
         # We will share a single session for all requests in a cycle
         self.session = None
+        self.bbo_cache: Dict[str, Dict[str, float]] = {}  # V23 Phase 2
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession(
@@ -132,6 +133,42 @@ class BinanceProvider:
             except Exception as e:
                 logger.error("❌ WSS Error on %s: %s. Reconnecting in 5s...", symbol, e)
                 await asyncio.sleep(5)
+
+    async def stream_bbo(self, symbol: str) -> None:
+        """
+        V23 Phase 2: Connects to Binance bookTicker WSS.
+        Runs infinitely in background updating the BBO cache.
+        """
+        url = f"wss://fstream.binance.com/ws/{symbol.lower()}@bookTicker"
+        logger.info("🔌 Initializing BBO WSS connection to %s", url)
+        
+        while True:
+            try:
+                async with self.session.ws_connect(url, timeout=30) as ws:
+                    logger.info("🟢 BBO WSS Connected for %s", symbol)
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            data = json.loads(msg.data)
+                            if 'b' in data and 'a' in data:
+                                # Process bookTicker update
+                                self.bbo_cache[symbol] = {
+                                    'bid_price': float(data['b']),
+                                    'bid_qty': float(data['B']),
+                                    'ask_price': float(data['a']),
+                                    'ask_qty': float(data['A'])
+                                }
+                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                            break
+            except asyncio.CancelledError:
+                logger.info("🛑 BBO WSS stream cancelled for %s.", symbol)
+                raise
+            except Exception as e:
+                logger.error("❌ BBO WSS Error on %s: %s. Reconnecting in 5s...", symbol, e)
+                await asyncio.sleep(5)
+
+    def get_bbo(self, symbol: str) -> Optional[Dict[str, float]]:
+        """Return cached BBO data for symbol."""
+        return self.bbo_cache.get(symbol)
 
     async def fetch_open_interest_delta(self, symbol: str) -> float:
         """Fetch % % change in Open Interest over the last hour."""

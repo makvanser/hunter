@@ -110,6 +110,9 @@ DCA_MAX_DRAWDOWN_PCT = 3.0     # V22: block DCA if single position drawdown > 3%
 ML_ENABLED = True              # Enable ML signal filtering
 ML_CONFIDENCE_THRESHOLD = 0.60 # Minimum P(profit) to allow trade
 
+# ── Institutional Execution (V23) ────────────────────────────
+LIMIT_ORDER_TIMEOUT_SEC = 30   # Seconds to wait for Limit order fill before cancel
+
 # ── Trading Costs (V16) ──────────────────────────────────────
 TAKER_FEE = 0.0004            # Binance Futures taker fee = 0.04%
 SLIPPAGE = 0.0005             # Estimated slippage = 0.05% per fill

@@ -229,6 +229,21 @@ async def run_cycle(
                                        hour=datetime.now(timezone.utc).hour):
             action = "HOLD"  # ML blocked this signal
 
+    # 8.75 Microstructure Order Book Imbalance Gate (V23 Phase 2)
+    bbo = provider.get_bbo(symbol)
+    if bbo and action in ["BUY", "SHORT"]:
+        bid_q = bbo['bid_qty']
+        ask_q = bbo['ask_qty']
+        obi = (bid_q - ask_q) / (bid_q + ask_q) if (bid_q + ask_q) > 0 else 0.0
+        logger.info("   🔬 Microstructure: OBI=%+.2f (Bid:%.1f Ask:%.1f)", obi, bid_q, ask_q)
+        
+        if action == "BUY" and obi < -0.30:
+            logger.warning("   ⛔ OBI BLOCKED BUY: Heavy Ask wall detected (OBI %+.2f)", obi)
+            action = "HOLD"
+        elif action == "SHORT" and obi > 0.30:
+            logger.warning("   ⛔ OBI BLOCKED SHORT: Heavy Bid wall detected (OBI %+.2f)", obi)
+            action = "HOLD"
+
     # 9. Execute
     result = trader.execute_trade(action, current_price, symbol, atr=atr)
     if inspect.iscoroutine(result):
@@ -329,7 +344,11 @@ async def run_auto():
             logger.info("🎯 Starting WSS auto mode for %d pairs: %s", len(top_pairs), top_pairs)
             
             # Run persistent WSS tasks concurrently indefinitely
-            tasks = [run_pair_wss(sym, provider, trader, social_manager, macro_manager, ml_filter) for sym in top_pairs]
+            tasks = []
+            for sym in top_pairs:
+                tasks.append(run_pair_wss(sym, provider, trader, social_manager, macro_manager, ml_filter))
+                tasks.append(provider.stream_bbo(sym))
+            
             await asyncio.gather(*tasks)
 
         except Exception as exc:

@@ -59,6 +59,7 @@ class MLFilter:
             "macd_hist_norm", "bb_position", "adx",
             "atr_pct", "vwap_diff_pct", "composite_score",
             "volume_ratio", "price_change_5bar", "hour_sin",
+            "funding_rate_norm", "oi_delta_norm"
         ]
         if not ML_AVAILABLE:
             logger.warning("⚠️ scikit-learn not installed. ML filter disabled.")
@@ -111,6 +112,8 @@ class MLFilter:
                 min(vol_ratio, 5.0) / 5.0,           # Normalize: 5x = 1.0
                 price_change_5 / 10.0,               # Normalize: 10% move = 1.0
                 hour_sin,                            # Already -1 to 1
+                getattr(market_state, 'funding_rate', 0.0) * 1000.0,  # V23: Normalize ~0.0001 -> 0.1
+                getattr(market_state, 'open_interest_delta', 0.0) / 10.0, # V23: Normalize 10% = 1.0
             ], dtype=np.float64)
 
             # Replace NaN/Inf

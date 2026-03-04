@@ -19,7 +19,8 @@ from datetime import datetime, timezone
 from config import (
     BASE_URL, API_KEY, API_SECRET,
     USE_TESTNET, INITIAL_BALANCE_USD, MAX_OPEN_POSITIONS, MAX_EXPOSURE_USD,
-    ATR_SL_MULTIPLIER, ATR_TP_MULTIPLIER, SHORT_ENABLED
+    ATR_SL_MULTIPLIER, ATR_TP_MULTIPLIER, SHORT_ENABLED,
+    LIMIT_ORDER_TIMEOUT_SEC
 )
 from database import log_trade, get_consecutive_losses, init_db, load_positions, save_position, delete_position
 from execution import PaperTrader
@@ -44,6 +45,7 @@ class LiveTrader(PaperTrader):
         # V22: Track real exchange balance for accurate drawdown calculation
         self._initial_balance_synced = False
         self._initial_balance = INITIAL_BALANCE_USD  # fallback until first sync
+        self._symbol_infoCache: Dict[str, Dict[str, float]] = {}
         
         logger.info("✅ LiveTrader initialized for %s", "TESTNET" if USE_TESTNET else "MAINNET")
         
@@ -101,6 +103,26 @@ class LiveTrader(PaperTrader):
                 logger.error("❌ Async HTTP Error on GET %s: %s", endpoint, e)
                 return {"error": str(e)}
 
+    async def _api_delete(self, endpoint: str, params: Dict[str, Any]) -> Dict:
+        """Internal helper for signed DELETE requests."""
+        params['timestamp'] = int(time.time() * 1000)
+        params['signature'] = self._sign_payload(params)
+        url = f"{BASE_URL}{endpoint}"
+        
+        headers = {"X-MBX-APIKEY": API_KEY, "Content-Type": "application/x-www-form-urlencoded"}
+        
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.delete(url, headers=headers, params=params) as response:
+                    data = await response.json()
+                    if response.status != 200:
+                        logger.error("❌ Binance API Error [%s]: %s", response.status, data.get('msg', data))
+                        return {"error": data}
+                    return data
+            except Exception as e:
+                logger.error("❌ Async HTTP Error on DELETE %s: %s", endpoint, e)
+                return {"error": str(e)}
+
     async def sync_balance(self) -> float:
         """Fetch USDT balance from Binance Futures."""
         payload = {'timestamp': int(time.time() * 1000)}
@@ -124,6 +146,35 @@ class LiveTrader(PaperTrader):
                                 logger.info("💰 Initial balance synced from exchange: $%.2f", real_bal)
                             return real_bal
         return self.balance
+
+    async def _get_symbol_info(self, symbol: str) -> Dict[str, float]:
+        """Fetch and cache precision rules for a symbol."""
+        if symbol in self._symbol_infoCache:
+            return self._symbol_infoCache[symbol]
+            
+        url = f"{BASE_URL}/fapi/v1/exchangeInfo"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    for sym in data.get('symbols', []):
+                        if sym['symbol'] == symbol:
+                            tick_size = 0.01
+                            step_size = 0.001
+                            for f in sym.get('filters', []):
+                                if f['filterType'] == 'PRICE_FILTER':
+                                    tick_size = float(f['tickSize'])
+                                elif f['filterType'] == 'LOT_SIZE':
+                                    step_size = float(f['stepSize'])
+                            
+                            self._symbol_infoCache[symbol] = {
+                                'tickSize': tick_size,
+                                'stepSize': step_size
+                            }
+                            return self._symbol_infoCache[symbol]
+        
+        # Fallback defaults if fetch fails
+        return {'tickSize': 0.01, 'stepSize': 0.001}
 
     async def set_leverage(self, symbol: str, leverage: int = 2) -> bool:
         """Set margin leverage prior to trading."""
@@ -149,6 +200,57 @@ class LiveTrader(PaperTrader):
             
         logger.info("🚀 LIVE ORDER EXECUTED: %s %s size=%s", side, symbol, quantity)
         return avg_price
+
+    def _round_to_step(self, value: float, step: float) -> str:
+        """Round value to the nearest step size, returning a clean string for Binance."""
+        if step <= 0: return str(value)
+        import math
+        precision = max(0, int(round(-math.log10(step))))
+        rounded = round(int(value / step) * step, precision)
+        return f"{rounded:.{precision}f}".rstrip('0').rstrip('.') if precision > 0 else str(int(rounded))
+
+    async def open_limit_order(self, symbol: str, side: str, quantity: float, price: float) -> float:
+        """Place a POST_ONLY limit order. Poll until filled or timeout."""
+        info = await self._get_symbol_info(symbol)
+        qty_str = self._round_to_step(quantity, info['stepSize'])
+        price_str = self._round_to_step(price, info['tickSize'])
+        
+        payload = {
+            "symbol": symbol,
+            "side": side,
+            "type": "LIMIT",
+            "timeInForce": "GTX",  # GTX = Post Only (Maker)
+            "quantity": qty_str,
+            "price": price_str
+        }
+        res = await self._api_post("/fapi/v1/order", payload)
+        
+        if "error" in res:
+            logger.error("💥 Failed to open %s limit order: %s", side, res)
+            return -1.0
+            
+        order_id = res.get("orderId")
+        timeout = LIMIT_ORDER_TIMEOUT_SEC
+        start_time = time.time()
+        
+        logger.info("⏳ Waiting for %s LIMIT order %s@%s to fill...", side, qty_str, price_str)
+        
+        while time.time() - start_time < timeout:
+            await asyncio.sleep(1)
+            check = await self._api_get("/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
+            status = check.get("status")
+            if status == "FILLED":
+                avg_price = float(check.get('avgPrice', 0))
+                logger.info("🚀 LIMIT ORDER EXECUTED: %s %s size=%s @ %.4f", side, symbol, qty_str, avg_price)
+                return avg_price
+            elif status in ["CANCELED", "REJECTED", "EXPIRED"]:
+                logger.warning("⚠️ Limit order %s %s was %s", side, symbol, status)
+                return -1.0
+                
+        # Timeout reached
+        logger.warning("⚠️ Limit order timeout (%ds). Canceling order %s...", timeout, order_id)
+        await self._api_delete("/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
+        return -1.0
 
     # ── ASYNC OVERRIDES ────────────────────────────────────────────────────────
 
@@ -230,13 +332,14 @@ class LiveTrader(PaperTrader):
         if USE_TESTNET and quantity < 0.05:
             quantity = 0.05  # Force minimum testnet order volume
         
-        avg_price = await self.open_market_order(symbol, side, quantity)
+        # V23 Phase 1: Institutional Limit Execution for Entries
+        avg_price = await self.open_limit_order(symbol, side, quantity, current_price)
         if avg_price < 0:
-            result["action"], result["blocked"] = "API_ERROR", True
+            result["action"], result["blocked"] = "API_LIMIT_FAILED", True
             return result
         
-        # Use API price if valid, fallback to feed
-        entry = avg_price if avg_price > 0 else current_price
+        # Use API execution price
+        entry = avg_price
         
         stop_loss, take_profit = None, None
         if atr > 0:

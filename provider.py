@@ -8,7 +8,7 @@ Strictly separated from Trading/Analysis logic (Single Responsibility Principle)
 import asyncio
 import logging
 import json
-from typing import Dict, List, Tuple, Any, AsyncGenerator
+from typing import Dict, List, Tuple, Any, AsyncGenerator, Optional
 
 import aiohttp
 

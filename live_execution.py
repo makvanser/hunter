@@ -223,8 +223,11 @@ class LiveTrader(PaperTrader):
                 # Spread price further away from current price
                 spread_mult = 1.0 - (GRID_SPREAD_PCT / 100.0 * i) if side == "BUY" else 1.0 + (GRID_SPREAD_PCT / 100.0 * i)
                 grid_price = price * spread_mult
+                qty_str = self._round_to_step(chunk_qty, info['stepSize'])
+                if float(qty_str) <= 0:
+                    qty_str = str(info['stepSize'])
                 orders.append({
-                    "qty": self._round_to_step(chunk_qty, info['stepSize']),
+                    "qty": qty_str,
                     "price": self._round_to_step(grid_price, info['tickSize'])
                 })
         else:

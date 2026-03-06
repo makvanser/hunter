@@ -297,7 +297,7 @@ async def run_pair_wss(symbol: str, provider: BinanceProvider, trader, social_ma
                     data['closes'].pop(0); data['closes'].append(float(kline['c']))
                     data['volumes'].pop(0); data['volumes'].append(float(kline['v']))
                     
-                    market_closes_cache[symbol] = data['closes']
+                    market_closes_cache[symbol] = data['closes'][-200:]
                     
                     # 2. Zero-latency execution using the cached auxiliary data!
                     await run_cycle(trader, symbol, social_manager, macro_manager, provider, prefetched_data=data, ml_filter=ml_filter)

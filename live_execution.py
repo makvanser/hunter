@@ -23,7 +23,7 @@ from config import (
     MAKER_GRID_ENABLED, GRID_ORDERS_COUNT, GRID_SPREAD_PCT,
     DYNAMIC_TP_ENABLED, DYNAMIC_TP_MAX_MULT,
     TRAILING_SL_ENABLED, TRAILING_SL_ACTIVATION_PCT, TRAILING_SL_ATR_MULT,
-    USE_TESTNET, USE_DYNAMIC_SIZING, RISK_PER_TRADE_PCT
+    USE_TESTNET, USE_DYNAMIC_SIZING, RISK_PER_TRADE_PCT, INITIAL_BALANCE_USD
 )
 from database import log_trade, get_consecutive_losses, init_db, load_positions, save_position, delete_position
 from execution import PaperTrader

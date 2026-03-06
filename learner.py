@@ -18,7 +18,7 @@ from ml import MLFilter
 from config import (
     ADX_PERIOD, ATR_PERIOD, BB_PERIOD, RSI_PERIOD,
     MACD_FAST, MACD_SLOW, MACD_SIGNAL, SR_LOOKBACK, VWAP_BARS,
-    ATR_SL_MULTIPLIER, MAINNET_URL
+    ATR_SL_MULTIPLIER
 )
 from analysis import (
     compute_adx, compute_atr, compute_bollinger, compute_macd,

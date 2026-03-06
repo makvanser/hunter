@@ -45,7 +45,7 @@ BLACKLIST = [
 ]
 
 # ── Top-pair scanner ─────────────────────────────────────────
-TOP_PAIRS_COUNT = 10         # How many symbols to scan in Auto mode
+TOP_PAIRS_COUNT = 50         # How many symbols to scan in Auto mode
 
 # ── ADX  (Market Regime Filter) ──────────────────────────────
 ADX_PERIOD = 14

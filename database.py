@@ -10,8 +10,22 @@ V16: Added `positions` table for persistence across restarts.
 """
 
 import sqlite3
+import os
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
+import redis
+
+# Global synchronous Redis Pool for instantaneous in-memory state tracking
+# V25: Eliminating SQLite I/O blocks for circuit breakers
+try:
+    redis_client = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+    redis_client.ping() # Quick check
+except Exception:
+    redis_client = None # Fallback for local tests without redis running
+
+logger = logging.getLogger("hunter.database")
+
 
 from config import DB_PATH, MAX_CONSECUTIVE_LOSSES, COOLDOWN_HOURS
 
@@ -116,11 +130,24 @@ def log_trade(
     if pnl < 0:
         losses = _get_state_int(c, "consecutive_losses") + 1
         _set_state(c, "consecutive_losses", str(losses))
+        if redis_client:
+            try:
+                redis_client.set("hunter:consecutive_losses", str(losses))
+            except Exception: pass
+            
         if losses >= MAX_CONSECUTIVE_LOSSES:
             cooldown_end = datetime.now(timezone.utc) + timedelta(hours=COOLDOWN_HOURS)
             _set_state(c, "cooldown_until", cooldown_end.isoformat())
+            if redis_client:
+                try:
+                    redis_client.set("hunter:cooldown_until", cooldown_end.isoformat())
+                except Exception: pass
     else:
         _set_state(c, "consecutive_losses", "0")
+        if redis_client:
+            try:
+                redis_client.set("hunter:consecutive_losses", "0")
+            except Exception: pass
 
     conn.commit()
     conn.close()
@@ -243,6 +270,16 @@ def get_trade_stats(db_path: str = DB_PATH, n_recent: int = 50) -> Dict:
 # Circuit-Breaker Queries
 # ─────────────────────────────────────────────────────────────
 def get_consecutive_losses(db_path: str = DB_PATH) -> int:
+    # Fast path: Redis
+    if redis_client:
+        try:
+            val = redis_client.get("hunter:consecutive_losses")
+            if val is not None:
+                return int(val)
+        except Exception:
+            pass
+            
+    # Fallback to SQLite (IO-bound)
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
     val = _get_state_int(c, "consecutive_losses")
@@ -251,19 +288,36 @@ def get_consecutive_losses(db_path: str = DB_PATH) -> int:
 
 
 def get_cooldown_until(db_path: str = DB_PATH) -> Optional[datetime]:
-    conn = sqlite3.connect(db_path)
-    c = conn.cursor()
-    raw = _get_state_str(c, "cooldown_until")
-    conn.close()
+    # Fast Path: Redis
+    raw = None
+    if redis_client:
+        try:
+            raw = redis_client.get("hunter:cooldown_until")
+        except Exception:
+            pass
+            
+    if not raw:
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        raw = _get_state_str(c, "cooldown_until")
+        conn.close()
+        
     if not raw:
         return None
     return datetime.fromisoformat(raw)
 
 
 def set_cooldown_until(dt: Optional[datetime], db_path: str = DB_PATH) -> None:
+    val = dt.isoformat() if dt else ""
+    if redis_client:
+        try:
+            redis_client.set("hunter:cooldown_until", val)
+        except Exception:
+            pass
+
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    _set_state(c, "cooldown_until", dt.isoformat() if dt else "")
+    _set_state(c, "cooldown_until", val)
     conn.commit()
     conn.close()
 
@@ -278,6 +332,13 @@ def is_on_cooldown(db_path: str = DB_PATH) -> bool:
 
 def reset_circuit_breaker(db_path: str = DB_PATH) -> None:
     """Manually reset both the loss counter and the cooldown."""
+    if redis_client:
+        try:
+            redis_client.set("hunter:consecutive_losses", "0")
+            redis_client.set("hunter:cooldown_until", "")
+        except Exception:
+            pass
+
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
     _set_state(c, "consecutive_losses", "0")

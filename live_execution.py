@@ -23,7 +23,8 @@ from config import (
     MAKER_GRID_ENABLED, GRID_ORDERS_COUNT, GRID_SPREAD_PCT,
     DYNAMIC_TP_ENABLED, DYNAMIC_TP_MAX_MULT,
     TRAILING_SL_ENABLED, TRAILING_SL_ACTIVATION_PCT, TRAILING_SL_ATR_MULT,
-    USE_TESTNET, USE_DYNAMIC_SIZING, RISK_PER_TRADE_PCT, INITIAL_BALANCE_USD
+    USE_TESTNET, USE_DYNAMIC_SIZING, MAX_RISK_PER_TRADE_PCT, INITIAL_BALANCE_USD,
+    KELLY_ENABLED, KELLY_FRACTION, KELLY_MIN_TRADES
 )
 from database import log_trade, get_consecutive_losses, init_db, load_positions, save_position, delete_position
 from execution import PaperTrader
@@ -360,13 +361,12 @@ class LiveTrader(PaperTrader):
 
         total_exposure = sum(p["size_usd"] for p in self.positions.values())
         
-        if USE_DYNAMIC_SIZING:
-            # Dynamic compounding size: Calculate base risk per trade from actual balance and apply leverage
-            size_usd = self.balance * (RISK_PER_TRADE_PCT / 100.0) * LEVERAGE
-        else:
-            size_usd = self._kelly_position_size()
-            
-        size_usd = min(size_usd, self.balance * LEVERAGE, MAX_EXPOSURE_USD - total_exposure)
+        # V25: Always use Kelly-based sizing (1/4 Kelly conservative model)
+        size_usd = self._kelly_position_size()
+        
+        # Hard cap: never exceed MAX_RISK_PER_TRADE_PCT of balance * leverage
+        max_risk_usd = self.balance * (MAX_RISK_PER_TRADE_PCT / 100.0) * LEVERAGE
+        size_usd = min(size_usd, max_risk_usd, MAX_EXPOSURE_USD - total_exposure)
 
         if size_usd < 100:
             size_usd = 3000.0  # Binance testnet minimal limit

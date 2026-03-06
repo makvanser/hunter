@@ -101,7 +101,7 @@ VOLUME_CONFIRM_BARS = 3        # Compare last N bars vs previous period
 TRADE_SIZE_USD = 100           # Fallback static size
 INITIAL_BALANCE_USD = 10_000   # Default balance for PaperTrading
 USE_DYNAMIC_SIZING = True      # V24: Use actual balance for trade sizing
-RISK_PER_TRADE_PCT = 50.0      # V24: Risk 50% of total balance per trade for aggressive growth on small capital (<$1000)
+MAX_RISK_PER_TRADE_PCT = 10.0  # V25: Hard cap: risk maximum 10% of total balance per trade
 MAX_OPEN_POSITIONS = 1         # V22: single position = full focus for $100 capital
 MAX_EXPOSURE_USD = 3000        # V22: 3000 (was 300) — realistic exposure
 LEVERAGE = 5                   # V22: 5× leverage for small capital amplification
@@ -112,23 +112,33 @@ DCA_MAX_DRAWDOWN_PCT = 3.0     # V22: block DCA if single position drawdown > 3%
 
 # ── ML Signal Filter (V22 / Phase 6) ─────────────────────────
 ML_ENABLED = True              # Enable ML signal filtering
-ML_CONFIDENCE_THRESHOLD = 0.55 # Minimum P(profit) to allow trade (lowered from 0.60 for aggression)
+ML_CONFIDENCE_THRESHOLD = 0.51 # V25: Lowered threshold for statistical edge without massive overlap reduction
 
 # ── Institutional Execution (V23/V24 Maker Grid) ─────────────
-LIMIT_ORDER_TIMEOUT_SEC = 30   # Seconds to wait for Limit order fill before cancel
+LIMIT_ORDER_TIMEOUT_SEC = 120  # V25: Wait up to 120s for Limit order fill before cancel (partial fill safety)
 MAKER_GRID_ENABLED = True      # V24: Place a grid of Maker bids instead of a single order
 GRID_ORDERS_COUNT = 3          # V24: Number of orders in the grid
-GRID_SPREAD_PCT = 0.15         # V24: Percent spacing between grid levels
+GRID_SPREAD_PCT = 0.35         # V25: Min step = %0.35 to cover round trip maker fees AND slippage
 
 # ── Trading Costs (V16) ──────────────────────────────────────
 TAKER_FEE = 0.0004            # Binance Futures taker fee = 0.04%
+MAKER_FEE = 0.001             # Standard fee = 0.1%
+MAKER_FEE_BNB = 0.00075       # V25: 25% discount via BNB (=0.075%)
 SLIPPAGE = 0.0005             # Estimated slippage = 0.05% per fill
 # Total round-trip cost = (TAKER_FEE + SLIPPAGE) × 2 × size_usd
 
+# ── Dynamic Grid Math (V25) ──────────────────────────────────
+# Profit per grid slice = Grid Spread % - (Commission % * 2)
+_grid_profit = (GRID_SPREAD_PCT / 100.0) - (MAKER_FEE_BNB * 2)
+if _grid_profit <= 0:
+    raise ValueError(f"FATAL: GRID_SPREAD_PCT ({GRID_SPREAD_PCT}%) doesn't cover Maker fees (Profit: {_grid_profit*100:.3f}%).")
+if GRID_SPREAD_PCT <= 0.20:
+    raise ValueError(f"FATAL: GRID_SPREAD_PCT must be strictly > 0.20% bounds for slippage. Provided: {GRID_SPREAD_PCT}%")
+
 # ── Kelly Criterion (V16) ────────────────────────────────────
 KELLY_ENABLED = True           # Use Kelly to size positions dynamically
-KELLY_FRACTION = 0.5           # Half-Kelly (conservative)
-KELLY_MAX_PCT = 0.02           # Cap at 2% of balance per trade
+KELLY_FRACTION = 0.25          # V25: Conservative 1/4 Kelly model
+KELLY_MAX_PCT = 0.10           # V25: Hard cap at 10% of balance per trade
 KELLY_MIN_TRADES = 10          # Min trades before Kelly activates
 
 # ── Contrarian Signal Thresholds ─────────────────────────────

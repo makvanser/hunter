@@ -54,12 +54,16 @@ from analysis import (
 )
 from execution import PaperTrader
 from live_execution import LiveTrader
+from database import is_on_cooldown, reset_circuit_breaker
 from provider import BinanceProvider
 from report import ReportGenerator
 from social import SocialManager
 from macro import MacroManager
 from ml import MLFilter
+from learner import ContinuousLearner
 from statarb import StatArbEngine
+from telemetry import TelemetryManager
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ─────────────────────────────────────────────────────────────
 # Logging
@@ -69,6 +73,7 @@ logging.basicConfig(
     format="%(asctime)s | %(name)-20s | %(levelname)-7s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+logging.getLogger("matplotlib").setLevel(logging.WARNING)
 logger = logging.getLogger("hunter.main")
 
 # ─────────────────────────────────────────────────────────────
@@ -150,6 +155,8 @@ async def run_cycle(
     rsi_series = compute_rsi_series(closes, RSI_PERIOD)
     divergence = detect_divergence(closes, rsi_series, adx_value=adx)
 
+    TelemetryManager.set_adx(symbol, adx)
+
     supports, resistances = compute_support_resistance(highs, lows, SR_LOOKBACK)
     near_support = any(abs(current_price - s) / current_price * 100 < SR_PROXIMITY_PCT for s in supports)
     near_resistance = any(abs(current_price - r) / current_price * 100 < SR_PROXIMITY_PCT for r in resistances)
@@ -230,10 +237,15 @@ async def run_cycle(
                                        closes=closes, volumes=volumes,
                                        hour=datetime.now(timezone.utc).hour):
             action = "HOLD"  # ML blocked this signal
+            
+        # Hook ML Confidence to Telemetry (if available)
+        if hasattr(ml_filter, 'last_probability'):
+            TelemetryManager.set_ml_confidence(symbol, action, ml_filter.last_probability)
 
     # 8.75 Microstructure Order Book Imbalance Gate (V23/V24 Phase 3)
     # V24 Phase 3: Using Deep OBI (Top 20 levels) instead of BBO for true wall detection
     obi = provider.get_deep_obi(symbol)
+    TelemetryManager.set_deep_obi(symbol, obi)
     if action in ["BUY", "SHORT"]:
         logger.info("   🔬 Deep Microstructure: OBI=%+.2f", obi)
         
@@ -244,10 +256,14 @@ async def run_cycle(
             logger.warning("   ⛔ OBI BLOCKED SHORT: Heavy Bid wall detected in Depth20 (OBI %+.2f)", obi)
             action = "HOLD"
 
-    # 9. Execute
-    result = trader.execute_trade(action, current_price, symbol, atr=atr)
-    if inspect.iscoroutine(result):
-        result = await result
+    # 9. Execute with latency tracking
+    with TelemetryManager.track_latency():
+        result = trader.execute_trade(action, current_price, symbol, atr=atr)
+        if inspect.iscoroutine(result):
+            result = await result
+            
+        if result.get("action") not in ("NONE", "HOLD", "NO_ACTION"):
+            TelemetryManager.inc_trade(result["action"], symbol)
     
     # 10. Generate beautiful Report
     ReportGenerator.print_cycle_report(symbol, market_state, signal_dict, result)
@@ -285,6 +301,9 @@ async def run_pair_wss(symbol: str, provider: BinanceProvider, trader, social_ma
     """Handles persistent WSS stream for a specific pair."""
     logger.info("📡 Starting Zero-Latency WSS listener for %s", symbol)
     while True:
+        # Track system metrics via Prometheus (V25)
+        TelemetryManager.set_balance(trader.balance)
+        TelemetryManager.set_open_positions(trader.open_positions_count())
         try:
             # Prime data via REST
             data = await provider.fetch_all_market_data(symbol, MULTI_TF_INTERVALS)
@@ -340,8 +359,10 @@ async def run_auto():
     trader = LiveTrader() if LIVE_TRADING else PaperTrader()
     social_manager = SocialManager()
     macro_manager = MacroManager()
-    ml_filter = MLFilter()
     ml_filter.load()  # Load pre-trained model if available
+    
+    # Expose Prometheus HTTP Metrics Endpoint
+    TelemetryManager.start_server(port=8000)
 
     # V22: Sync real exchange balance before any trades
     if LIVE_TRADING and hasattr(trader, 'sync_balance'):
@@ -362,6 +383,18 @@ async def run_auto():
                     top_pairs.append(sym)
             
             logger.info("🎯 Starting WSS auto mode for %d pairs: %s", len(top_pairs), top_pairs)
+            
+            # Phase 2: ML Continuous Learning Pipeline (Walk-Forward Optimization)
+            learner = ContinuousLearner(ml_filter)
+            scheduler = AsyncIOScheduler()
+            # Retrain once a week on Sundays at 00:00 (14 days = 336 hours limits)
+            scheduler.add_job(
+                learner.retrain_model_walk_forward, 
+                'cron', day_of_week='sun', hour=0, minute=0,
+                args=[top_pairs[:10], 336]
+            )
+            scheduler.start()
+            logger.info("📅 ML Continuous Learning Pipeline Scheduled (Sundays @ 00:00)")
             
             # Run persistent WSS tasks concurrently indefinitely
             tasks = []

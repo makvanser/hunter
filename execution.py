@@ -26,6 +26,7 @@ from config import (
     KELLY_MAX_PCT,
     KELLY_MIN_TRADES,
     MAX_DRAWDOWN_PCT,
+    MAX_RISK_PER_TRADE_PCT,
     MAX_EXPOSURE_USD,
     MAX_OPEN_POSITIONS,
     SHORT_ENABLED,
@@ -160,24 +161,33 @@ class PaperTrader:
 
         if avg_win <= 0 or avg_loss <= 0:
             return min(TRADE_SIZE_USD, self.balance)
+            
+        win_loss_ratio = avg_win / avg_loss
 
-        # Kelly fraction = (wr * avg_win - (1-wr) * avg_loss) / avg_win
-        kelly_f = (wr * avg_win - (1 - wr) * avg_loss) / avg_win
-        kelly_f = max(0.01, min(kelly_f, 0.5))  # clamp: never <1% or >50%
-        half_kelly = kelly_f * KELLY_FRACTION    # conservative half-Kelly
+        # V25 Modified Kelly: Win Rate - (Loss Rate / Win-Loss Ratio)
+        loss_rate = 1.0 - wr
+        basic_kelly = wr - (loss_rate / win_loss_ratio)
+        basic_kelly = max(0.01, min(basic_kelly, 1.0))  # clamp: never <1% or >100%
+        
+        # Actual Position = Basic Kelly * 0.25 (1/4 Kelly conservative model)
+        actual_position_pct = basic_kelly * KELLY_FRACTION
+        
+        # Hard Cap: Max 10% risk
+        max_allowed_pct = MAX_RISK_PER_TRADE_PCT / 100.0
+        final_pct = min(actual_position_pct, max_allowed_pct)
 
-        size = self.balance * half_kelly
-        size = min(size, self.balance * KELLY_MAX_PCT)  # cap at 2% of balance
-        size = max(size, 10.0)                          # minimum $10
+        size = self.balance * final_pct
+        size = max(size, 10.0)  # minimum $10
 
         logger.info(
             "Kelly sizing: wr=%.1f%% avg_win=$%.2f avg_loss=$%.2f → "
-            "kelly=%.3f half=%.3f → size=$%.2f",
+            "basic_kelly=%.3f quarter=%.3f cap=%.1f%% → size=$%.2f",
             wr * 100,
             avg_win,
             avg_loss,
-            kelly_f,
-            half_kelly,
+            basic_kelly,
+            actual_position_pct,
+            MAX_RISK_PER_TRADE_PCT,
             size,
         )
         return round(size, 2)

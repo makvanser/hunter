@@ -53,6 +53,7 @@ from config import (
     MAX_DCA_STEPS,
     DCA_PRICE_DROP_PCT,
     DCA_MAX_DRAWDOWN_PCT,
+    MAKER_GRID_ENABLED,
 )
 
 # Local adjustments for V17 where config doesn't have them
@@ -649,12 +650,23 @@ def compute_composite_score(state: MarketState) -> float:
     score -= bb_norm * WEIGHT_BB
 
     # 4) Trend Alignment (ADX & Regime)
-    regime_score = {
-        "STRONG_UP": 1.0,
-        "TRENDING": 0.5,
-        "CHOPPY": 0.0,
-        "STRONG_DOWN": -1.0,
-    }.get(state.regime, 0.0)
+    if MAKER_GRID_ENABLED:
+        # V25: Grid bots thrive in choppy sideways markets (low ADX < 20). 
+        # Penalize strong trends to prevent getting run over by a breakout.
+        regime_score = {
+            "STRONG_UP": -0.5,
+            "TRENDING": -0.2,
+            "CHOPPY": 0.8,
+            "STRONG_DOWN": -0.5,
+        }.get(state.regime, 0.0)
+    else:
+        # Trend strategy prefers strong momentum
+        regime_score = {
+            "STRONG_UP": 1.0,
+            "TRENDING": 0.5,
+            "CHOPPY": 0.0,
+            "STRONG_DOWN": -1.0,
+        }.get(state.regime, 0.0)
     score += regime_score * WEIGHT_TREND
 
     # 5) VWAP Reversion (Negative weight -> buy if price < VWAP)
@@ -785,12 +797,14 @@ def _generate_signal_core(state: MarketState, current_position: Optional[Union[s
     if pos_side == "SELL" and state.rsi < 30 - (state.atr_pct * 5) and pos_dca_count == 0:
         return "COVER"
 
-    # 5. Entry only in trending market (fallback basic strategy)
-    if pos_side is None and state.regime == "TRENDING":
-        if state.rsi < RSI_OVERSOLD and state.ls_ratio < LS_RATIO_THRESHOLD and state.whale_net_vol > WHALE_NET_VOL_MIN:
-            return "BUY"
-        if state.rsi > RSI_OVERBOUGHT and state.ls_ratio > 1.0 and state.whale_net_vol < -WHALE_NET_VOL_MIN:
-            return "SHORT"
+    # 5. Entry only in trending/choppy market based on config (fallback basic strategy)
+    if pos_side is None:
+        valid_regime = "CHOPPY" if MAKER_GRID_ENABLED else "TRENDING"
+        if state.regime == valid_regime:
+            if state.rsi < RSI_OVERSOLD and state.ls_ratio < LS_RATIO_THRESHOLD and state.whale_net_vol > WHALE_NET_VOL_MIN:
+                return "BUY"
+            if state.rsi > RSI_OVERBOUGHT and state.ls_ratio > 1.0 and state.whale_net_vol < -WHALE_NET_VOL_MIN:
+                return "SHORT"
 
     return "HOLD"
 

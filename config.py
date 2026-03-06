@@ -100,7 +100,7 @@ VOLUME_CONFIRM_BARS = 3        # Compare last N bars vs previous period
 # ── Position Sizing & Risk (V16 / V24 Auto-Compounding) ───────
 TRADE_SIZE_USD = 100           # Fallback static size
 USE_DYNAMIC_SIZING = True      # V24: Use actual balance for trade sizing
-RISK_PER_TRADE_PCT = 2.0       # V24: Risk 2% of total balance per trade
+RISK_PER_TRADE_PCT = 50.0      # V24: Risk 50% of total balance per trade for aggressive growth on small capital (<$1000)
 MAX_OPEN_POSITIONS = 1         # V22: single position = full focus for $100 capital
 MAX_EXPOSURE_USD = 3000        # V22: 3000 (was 300) — realistic exposure
 LEVERAGE = 5                   # V22: 5× leverage for small capital amplification

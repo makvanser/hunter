@@ -66,6 +66,11 @@ from telemetry import TelemetryManager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ─────────────────────────────────────────────────────────────
+# Global ML Filter instance
+# ─────────────────────────────────────────────────────────────
+ml_filter = MLFilter()
+
+# ─────────────────────────────────────────────────────────────
 # Logging
 # ─────────────────────────────────────────────────────────────
 logging.basicConfig(

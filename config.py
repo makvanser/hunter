@@ -99,6 +99,7 @@ VOLUME_CONFIRM_BARS = 3        # Compare last N bars vs previous period
 
 # ── Position Sizing & Risk (V16 / V24 Auto-Compounding) ───────
 TRADE_SIZE_USD = 100           # Fallback static size
+INITIAL_BALANCE_USD = 10_000   # Default balance for PaperTrading
 USE_DYNAMIC_SIZING = True      # V24: Use actual balance for trade sizing
 RISK_PER_TRADE_PCT = 50.0      # V24: Risk 50% of total balance per trade for aggressive growth on small capital (<$1000)
 MAX_OPEN_POSITIONS = 1         # V22: single position = full focus for $100 capital

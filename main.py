@@ -58,7 +58,7 @@ from provider import BinanceProvider
 from report import ReportGenerator
 from social import SocialManager
 from macro import MacroManager
-from ml_model import MLFilter
+from ml import MLFilter
 from statarb import StatArbEngine
 
 # ─────────────────────────────────────────────────────────────

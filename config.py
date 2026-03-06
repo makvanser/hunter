@@ -22,8 +22,8 @@ try:
 except ImportError:
     pass  # dotenv not installed, fall back to hardcoded values
 
-LIVE_TRADING = True
-USE_TESTNET = True
+LIVE_TRADING = str(os.getenv("LIVE_TRADING", "True")).strip().lower() in ("true", "1", "t", "yes")
+USE_TESTNET = str(os.getenv("USE_TESTNET", "True")).strip().lower() in ("true", "1", "t", "yes")
 
 API_KEY = os.getenv("BINANCE_API_KEY", "pcaM7VgCSD8iOrcq1vpqrq7L41kw2HdojfRK6vSXc8uJxREjkRhPjMvShyNIo5O9")
 API_SECRET = os.getenv("BINANCE_API_SECRET", "CpG0vk1MCKceaJhKDO3IwQzTC8ETxYOfFozOl677zj6IVaYWrysv76pHmRq7kT0S")

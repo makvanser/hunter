@@ -31,6 +31,7 @@ class BinanceProvider:
         # We will share a single session for all requests in a cycle
         self.session = None
         self.bbo_cache: Dict[str, Dict[str, float]] = {}  # V23 Phase 2
+        self.depth_cache: Dict[str, Dict[str, float]] = {} # V24 Phase 3
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession(
@@ -169,6 +170,58 @@ class BinanceProvider:
     def get_bbo(self, symbol: str) -> Optional[Dict[str, float]]:
         """Return cached BBO data for symbol."""
         return self.bbo_cache.get(symbol)
+
+    async def stream_depth(self, symbol: str) -> None:
+        """
+        V24 Phase 3: Connects to Binance deep orderbook WSS (@depth20@100ms).
+        Parses top 20 levels of bids and asks to calculate true liquidity walls.
+        """
+        url = f"wss://fstream.binance.com/ws/{symbol.lower()}@depth20@100ms"
+        logger.info("🔌 Initializing Depth20 WSS connection to %s", url)
+        
+        while True:
+            try:
+                async with self.session.ws_connect(url, timeout=30) as ws:
+                    logger.info("🟢 DEPTH WSS Connected for %s", symbol)
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            data = json.loads(msg.data)
+                            if 'b' in data and 'a' in data:
+                                # Data format: 'b': [[price, qty], [price, qty]...], 'a': [...]
+                                bid_vol = sum(float(level[1]) for level in data['b'])
+                                ask_vol = sum(float(level[1]) for level in data['a'])
+                                
+                                self.depth_cache[symbol] = {
+                                    'deep_bid_vol': bid_vol,
+                                    'deep_ask_vol': ask_vol
+                                }
+                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                            break
+            except asyncio.CancelledError:
+                logger.info("🛑 DEPTH WSS stream cancelled for %s.", symbol)
+                raise
+            except Exception as e:
+                logger.error("❌ DEPTH WSS Error on %s: %s. Reconnecting in 5s...", symbol, e)
+                await asyncio.sleep(5)
+
+    def get_deep_obi(self, symbol: str) -> float:
+        """
+        V24 Phase 3: Returns the Order Book Imbalance (OBI) from the top 20 levels.
+        OBI = (BidVol - AskVol) / (BidVol + AskVol)
+        Returns a float between -1.0 (Heavy Sell Walls) and +1.0 (Heavy Buy Walls).
+        """
+        depth = self.depth_cache.get(symbol)
+        if not depth:
+            return 0.0
+            
+        bids = depth['deep_bid_vol']
+        asks = depth['deep_ask_vol']
+        total = bids + asks
+        
+        if total == 0:
+            return 0.0
+            
+        return (bids - asks) / total
 
     async def fetch_open_interest_delta(self, symbol: str) -> float:
         """Fetch % % change in Open Interest over the last hour."""

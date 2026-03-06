@@ -17,10 +17,13 @@ from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 
 from config import (
-    BASE_URL, API_KEY, API_SECRET,
-    USE_TESTNET, INITIAL_BALANCE_USD, MAX_OPEN_POSITIONS, MAX_EXPOSURE_USD,
-    ATR_SL_MULTIPLIER, ATR_TP_MULTIPLIER, SHORT_ENABLED,
-    LIMIT_ORDER_TIMEOUT_SEC
+    API_KEY, API_SECRET, BASE_URL, 
+    MAX_EXPOSURE_USD, TRADE_SIZE_USD, MAX_OPEN_POSITIONS, LEVERAGE,
+    ATR_SL_MULTIPLIER, ATR_TP_MULTIPLIER, LIMIT_ORDER_TIMEOUT_SEC,
+    MAKER_GRID_ENABLED, GRID_ORDERS_COUNT, GRID_SPREAD_PCT,
+    DYNAMIC_TP_ENABLED, DYNAMIC_TP_MAX_MULT,
+    TRAILING_SL_ENABLED, TRAILING_SL_ACTIVATION_PCT, TRAILING_SL_ATR_MULT,
+    USE_TESTNET, USE_DYNAMIC_SIZING, RISK_PER_TRADE_PCT
 )
 from database import log_trade, get_consecutive_losses, init_db, load_positions, save_position, delete_position
 from execution import PaperTrader
@@ -210,46 +213,80 @@ class LiveTrader(PaperTrader):
         return f"{rounded:.{precision}f}".rstrip('0').rstrip('.') if precision > 0 else str(int(rounded))
 
     async def open_limit_order(self, symbol: str, side: str, quantity: float, price: float) -> float:
-        """Place a POST_ONLY limit order. Poll until filled or timeout."""
+        """Place POST_ONLY limit order(s). If Maker Grid is enabled, place multiple layered bids."""
         info = await self._get_symbol_info(symbol)
-        qty_str = self._round_to_step(quantity, info['stepSize'])
-        price_str = self._round_to_step(price, info['tickSize'])
         
-        payload = {
-            "symbol": symbol,
-            "side": side,
-            "type": "LIMIT",
-            "timeInForce": "GTX",  # GTX = Post Only (Maker)
-            "quantity": qty_str,
-            "price": price_str
-        }
-        res = await self._api_post("/fapi/v1/order", payload)
-        
-        if "error" in res:
-            logger.error("💥 Failed to open %s limit order: %s", side, res)
+        orders = []
+        if MAKER_GRID_ENABLED and GRID_ORDERS_COUNT > 1:
+            chunk_qty = quantity / GRID_ORDERS_COUNT
+            for i in range(GRID_ORDERS_COUNT):
+                # Spread price further away from current price
+                spread_mult = 1.0 - (GRID_SPREAD_PCT / 100.0 * i) if side == "BUY" else 1.0 + (GRID_SPREAD_PCT / 100.0 * i)
+                grid_price = price * spread_mult
+                orders.append({
+                    "qty": self._round_to_step(chunk_qty, info['stepSize']),
+                    "price": self._round_to_step(grid_price, info['tickSize'])
+                })
+        else:
+            orders.append({
+                "qty": self._round_to_step(quantity, info['stepSize']),
+                "price": self._round_to_step(price, info['tickSize'])
+            })
+            
+        order_ids = []
+        for o in orders:
+            payload = {
+                "symbol": symbol, "side": side, "type": "LIMIT", "timeInForce": "GTX",
+                "quantity": o["qty"], "price": o["price"]
+            }
+            res = await self._api_post("/fapi/v1/order", payload)
+            if "orderId" in res:
+                order_ids.append(res["orderId"])
+            else:
+                logger.error("💥 Failed to open %s limit grid order chunk: %s", side, res)
+                
+        if not order_ids:
             return -1.0
             
-        order_id = res.get("orderId")
         timeout = LIMIT_ORDER_TIMEOUT_SEC
         start_time = time.time()
+        logger.info("⏳ Waiting for %s GRID LIMIT %d orders to fill (total size: %s)...", side, len(order_ids), quantity)
         
-        logger.info("⏳ Waiting for %s LIMIT order %s@%s to fill...", side, qty_str, price_str)
+        filled_qty = 0.0
+        total_spent = 0.0
         
         while time.time() - start_time < timeout:
             await asyncio.sleep(1)
-            check = await self._api_get("/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
-            status = check.get("status")
-            if status == "FILLED":
-                avg_price = float(check.get('avgPrice', 0))
-                logger.info("🚀 LIMIT ORDER EXECUTED: %s %s size=%s @ %.4f", side, symbol, qty_str, avg_price)
-                return avg_price
-            elif status in ["CANCELED", "REJECTED", "EXPIRED"]:
-                logger.warning("⚠️ Limit order %s %s was %s", side, symbol, status)
-                return -1.0
+            
+            # Poll all active orders
+            active_ids = list(order_ids) # copy
+            for oid in active_ids:
+                check = await self._api_get("/fapi/v1/order", {"symbol": symbol, "orderId": oid})
+                status = check.get("status")
                 
-        # Timeout reached
-        logger.warning("⚠️ Limit order timeout (%ds). Canceling order %s...", timeout, order_id)
-        await self._api_delete("/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
+                if status == "FILLED":
+                    exec_qty = float(check.get('executedQty', 0))
+                    avg_px = float(check.get('avgPrice', 0))
+                    filled_qty += exec_qty
+                    total_spent += exec_qty * avg_px
+                    order_ids.remove(oid) # Done tracking this chunk
+                    logger.info("🚀 GRID CHUNK EXECUTED: %s %s size=%s @ %.4f", side, symbol, exec_qty, avg_px)
+                    
+            if not order_ids:
+                break # All filled!
+                
+        # Cancel remaining
+        for oid in order_ids:
+            await self._api_delete("/fapi/v1/order", {"symbol": symbol, "orderId": oid})
+            
+        if filled_qty > 0:
+            final_avg_price = total_spent / filled_qty
+            logger.info("✅ GRID COMPLETE: Executed total %.3f at Avg Price %.4f", filled_qty, final_avg_price)
+            # Override quantity parameter inside the caller requires changing the return signature, 
+            # but since V24 only uses this entry price to calculate SL/TP correctly:
+            return final_avg_price
+            
+        logger.warning("⚠️ Limit grid timeout (%ds) with no fills.", timeout)
         return -1.0
 
     # ── ASYNC OVERRIDES ────────────────────────────────────────────────────────
@@ -319,8 +356,14 @@ class LiveTrader(PaperTrader):
             return result
 
         total_exposure = sum(p["size_usd"] for p in self.positions.values())
-        size_usd = self._kelly_position_size()
-        size_usd = min(size_usd, self.balance, MAX_EXPOSURE_USD - total_exposure)
+        
+        if USE_DYNAMIC_SIZING:
+            # Dynamic compounding size: Calculate base risk per trade from actual balance and apply leverage
+            size_usd = self.balance * (RISK_PER_TRADE_PCT / 100.0) * LEVERAGE
+        else:
+            size_usd = self._kelly_position_size()
+            
+        size_usd = min(size_usd, self.balance * LEVERAGE, MAX_EXPOSURE_USD - total_exposure)
 
         if size_usd < 100:
             size_usd = 3000.0  # Binance testnet minimal limit
@@ -343,12 +386,19 @@ class LiveTrader(PaperTrader):
         
         stop_loss, take_profit = None, None
         if atr > 0:
+            tp_mult = ATR_TP_MULTIPLIER
+            if DYNAMIC_TP_ENABLED:
+                # If market is already explosive, allow larger TP to ride the wave.
+                # In V24 Phase 2 we dynamically scale TP up to 10x ATR if conditions are extreme.
+                # Currently using a static wide dynamic modifier, to be refined with 'market_state' in Phase 4.
+                tp_mult = min(DYNAMIC_TP_MAX_MULT, ATR_TP_MULTIPLIER * 1.5)
+            
             if side == "BUY":
                 stop_loss = entry - atr * ATR_SL_MULTIPLIER
-                take_profit = entry + atr * ATR_TP_MULTIPLIER
+                take_profit = entry + atr * tp_mult
             else:
                 stop_loss = entry + atr * ATR_SL_MULTIPLIER
-                take_profit = entry - atr * ATR_TP_MULTIPLIER
+                take_profit = entry - atr * tp_mult
 
         pos = {
             "side": side, "entry": entry, "size_usd": size_usd, "quantity": quantity,

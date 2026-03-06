@@ -70,10 +70,12 @@ MACD_FAST = 12               # Fast EMA period
 MACD_SLOW = 26               # Slow EMA period
 MACD_SIGNAL = 9              # Signal line EMA period
 
-# ── ATR (V14) ───────────────────────────────────────────────
+# ── ATR & Dynamic TP (V14/V24) ────────────────────────────────
 ATR_PERIOD = 14
 ATR_SL_MULTIPLIER = 2.0      # V22: Stop-Loss = entry ∓ ATR × 2.0 (wider for noise immunity)
 ATR_TP_MULTIPLIER = 3.5      # V22: Take-Profit = entry ± ATR × 3.5 (R:R = 1:1.75)
+DYNAMIC_TP_ENABLED = True    # V24: Adjust Take-Profit automatically based on volatility
+DYNAMIC_TP_MAX_MULT = 10.0   # V24: Maximum ATR multiplier for dynamic TP
 
 # ── Trailing Stop-Loss (V15) ─────────────────────────────────
 TRAILING_SL_ENABLED = True
@@ -95,9 +97,10 @@ MTF_AGREEMENT_MIN = 2
 VOLUME_CONFIRM_ENABLED = True  # Require rising volume on BUY signals
 VOLUME_CONFIRM_BARS = 3        # Compare last N bars vs previous period
 
-# ── Position Sizing & Risk (V16) ─────────────────────────────
-TRADE_SIZE_USD = 100
-INITIAL_BALANCE_USD = 10_000
+# ── Position Sizing & Risk (V16 / V24 Auto-Compounding) ───────
+TRADE_SIZE_USD = 100           # Fallback static size
+USE_DYNAMIC_SIZING = True      # V24: Use actual balance for trade sizing
+RISK_PER_TRADE_PCT = 2.0       # V24: Risk 2% of total balance per trade
 MAX_OPEN_POSITIONS = 1         # V22: single position = full focus for $100 capital
 MAX_EXPOSURE_USD = 3000        # V22: 3000 (was 300) — realistic exposure
 LEVERAGE = 5                   # V22: 5× leverage for small capital amplification
@@ -110,8 +113,11 @@ DCA_MAX_DRAWDOWN_PCT = 3.0     # V22: block DCA if single position drawdown > 3%
 ML_ENABLED = True              # Enable ML signal filtering
 ML_CONFIDENCE_THRESHOLD = 0.55 # Minimum P(profit) to allow trade (lowered from 0.60 for aggression)
 
-# ── Institutional Execution (V23) ────────────────────────────
+# ── Institutional Execution (V23/V24 Maker Grid) ─────────────
 LIMIT_ORDER_TIMEOUT_SEC = 30   # Seconds to wait for Limit order fill before cancel
+MAKER_GRID_ENABLED = True      # V24: Place a grid of Maker bids instead of a single order
+GRID_ORDERS_COUNT = 3          # V24: Number of orders in the grid
+GRID_SPREAD_PCT = 0.15         # V24: Percent spacing between grid levels
 
 # ── Trading Costs (V16) ──────────────────────────────────────
 TAKER_FEE = 0.0004            # Binance Futures taker fee = 0.04%

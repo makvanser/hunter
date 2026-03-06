@@ -54,11 +54,12 @@ from analysis import (
 )
 from execution import PaperTrader
 from live_execution import LiveTrader
-from social import SocialManager
-from macro import MacroManager
-from ml import MLFilter
 from provider import BinanceProvider
 from report import ReportGenerator
+from social import SocialManager
+from macro import MacroManager
+from ml_model import MLFilter
+from statarb import StatArbEngine
 
 # ─────────────────────────────────────────────────────────────
 # Logging
@@ -230,19 +231,17 @@ async def run_cycle(
                                        hour=datetime.now(timezone.utc).hour):
             action = "HOLD"  # ML blocked this signal
 
-    # 8.75 Microstructure Order Book Imbalance Gate (V23 Phase 2)
-    bbo = provider.get_bbo(symbol)
-    if bbo and action in ["BUY", "SHORT"]:
-        bid_q = bbo['bid_qty']
-        ask_q = bbo['ask_qty']
-        obi = (bid_q - ask_q) / (bid_q + ask_q) if (bid_q + ask_q) > 0 else 0.0
-        logger.info("   🔬 Microstructure: OBI=%+.2f (Bid:%.1f Ask:%.1f)", obi, bid_q, ask_q)
+    # 8.75 Microstructure Order Book Imbalance Gate (V23/V24 Phase 3)
+    # V24 Phase 3: Using Deep OBI (Top 20 levels) instead of BBO for true wall detection
+    obi = provider.get_deep_obi(symbol)
+    if action in ["BUY", "SHORT"]:
+        logger.info("   🔬 Deep Microstructure: OBI=%+.2f", obi)
         
         if action == "BUY" and obi < -0.30:
-            logger.warning("   ⛔ OBI BLOCKED BUY: Heavy Ask wall detected (OBI %+.2f)", obi)
+            logger.warning("   ⛔ OBI BLOCKED BUY: Heavy Ask wall detected in Depth20 (OBI %+.2f)", obi)
             action = "HOLD"
         elif action == "SHORT" and obi > 0.30:
-            logger.warning("   ⛔ OBI BLOCKED SHORT: Heavy Bid wall detected (OBI %+.2f)", obi)
+            logger.warning("   ⛔ OBI BLOCKED SHORT: Heavy Bid wall detected in Depth20 (OBI %+.2f)", obi)
             action = "HOLD"
 
     # 9. Execute
@@ -298,6 +297,8 @@ async def run_pair_wss(symbol: str, provider: BinanceProvider, trader, social_ma
                     data['closes'].pop(0); data['closes'].append(float(kline['c']))
                     data['volumes'].pop(0); data['volumes'].append(float(kline['v']))
                     
+                    market_closes_cache[symbol] = data['closes']
+                    
                     # 2. Zero-latency execution using the cached auxiliary data!
                     await run_cycle(trader, symbol, social_manager, macro_manager, provider, prefetched_data=data, ml_filter=ml_filter)
                     
@@ -311,6 +312,24 @@ async def run_pair_wss(symbol: str, provider: BinanceProvider, trader, social_ma
         except Exception as e:
             logger.error("❌ WSS Crash on %s: %s. Restarting...", symbol, e)
             await asyncio.sleep(5)
+
+# Global cache for StatArb
+market_closes_cache: Dict[str, List[float]] = {}
+
+async def _statarb_monitor_loop():
+    engine = StatArbEngine(z_score_threshold=2.5)
+    while True:
+        await asyncio.sleep(60 * 60) # Run every hour
+        if bool(market_closes_cache):
+            opps = engine.find_arbitrage_opportunities(market_closes_cache)
+            if opps:
+                logger.info("==============================================")
+                logger.info("  📈 STATISTICAL ARBITRAGE OPPORTUNITIES")
+                logger.info("==============================================")
+                for opp in opps[:3]: # Top 3
+                    logger.info("  %s -> Z-Score: %+.2f | Action: %s", opp['pair'], opp['z_score'], opp['action'])
+                logger.info("==============================================")
+
 
 async def run_auto():
     """Auto Mode: scan top pairs + held positions, loop over them asynchronously."""
@@ -348,7 +367,9 @@ async def run_auto():
             tasks = []
             for sym in top_pairs:
                 tasks.append(run_pair_wss(sym, provider, trader, social_manager, macro_manager, ml_filter))
-                tasks.append(provider.stream_bbo(sym))
+                tasks.append(provider.stream_depth(sym)) # V24 Phase 3: Depth20 instead of BBO
+            
+            tasks.append(_statarb_monitor_loop()) # V24 Phase 4: Background pairs monitor
             
             await asyncio.gather(*tasks)
 

@@ -1,25 +1,23 @@
-# V23 Institutional Upgrade
+# V25/V26 Institutional & Architectural Overhaul
 
-## Phase 1: Maker (Limit) Execution
+Based on the Senior Architectural Review, we are moving away from pure Python/SQLite to an enterprise deployment model.
 
-- [ ] Описать `LIMIT_ORDER_TIMEOUT_SEC` параметров в `config.py`
-- [ ] В `PaperTrader` (mock) добавить логику: симуляция limit исполнения по цене закрытия бара
-- [ ] В `live_execution.py` переписать `execute_trade`:
-  - Использовать `type='LIMIT'`, `timeInForce='GTC'`
-  - Запрашивать bookTicker / текущую цену перед отправкой
-  - Выставлять ордер. Если не заполнен за 30 сек (через API поллинг) -> отмена
-- [ ] Протестировать выставление Limit ордеров на Binance Testnet
+## Phase 1: High-Performance Database & Telemetry
 
-## Phase 2: Microstructure & Order Flow (BBO)
+- [ ] Install Redis on the Ubuntu server.
+- [ ] Migrate `database.py`: Replace SQLite circuit breaker tracking and Positional locking with async Redis Cache (`redis-py`).
+- [ ] Create `telemetry.py`: Integrate `prometheus_client`.
+- [ ] Expose `/metrics` for order latency, balance tracking, and ML confidence.
+- [ ] Set up Grafana dashboard for live monitoring without print statements.
 
-- [ ] Добавить подписку на `bookTicker` в `provider.py`
-- [ ] Кэшировать Best Bid / Ask и объемы в `provider.py`
-- [ ] В `main.py` добавить этап "Execution Gate": перед вызовом `execute_trade`, вычислить OBI (Order Book Imbalance).
-- [ ] Применить фильтр: отменить сделку, если OBI против нас.
+## Phase 2: ML Continuous Learning Pipeline
 
-## Phase 3: Alternative Data for ML
+- [ ] Update `ml.py`: Build `retrain_model()` to fetch the last 14 days of OHLCV data.
+- [ ] Implement Walk-Forward optimization logic.
+- [ ] Add a scheduler task in `main.py` (e.g., `apscheduler`) to retrain and override `ml_model.pkl` once a week.
 
-- [ ] Найти эндпоинты Binance для Funding Rate и Open Interest
-- [ ] Обновить сбор исторических данных `backtest.py`
-- [ ] Добавить в `MarketState`
-- [ ] Переобучить `ml_model.pkl`
+## Phase 3: Zero-Latency Core Execution (NautilusTrader)
+
+- [ ] Initialize NautilusTrader core to replace Python's `asyncio` WebSocket feeds.
+- [ ] Port `provider.py`'s Depth20 and Kline streams to Rust-native handlers.
+- [ ] Benchmark order execution speed on Testnet: goal is sub-5 millisecond response time from tick to order placement API call.

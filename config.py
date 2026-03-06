@@ -49,7 +49,7 @@ TOP_PAIRS_COUNT = 10         # How many symbols to scan in Auto mode
 
 # ── ADX  (Market Regime Filter) ──────────────────────────────
 ADX_PERIOD = 14
-ADX_THRESHOLD = 25           # < 25 → CHOPPY (no trade), ≥ 25 → TRENDING
+ADX_THRESHOLD = 20           # < 20 → CHOPPY (no trade), ≥ 20 → TRENDING (lowered from 25 for aggression)
 ADX_STRONG_TREND = 40        # V16: ADX > 40 → suppress divergence signals
 
 # ── RSI ──────────────────────────────────────────────────────
@@ -108,7 +108,7 @@ DCA_MAX_DRAWDOWN_PCT = 3.0     # V22: block DCA if single position drawdown > 3%
 
 # ── ML Signal Filter (V22 / Phase 6) ─────────────────────────
 ML_ENABLED = True              # Enable ML signal filtering
-ML_CONFIDENCE_THRESHOLD = 0.60 # Minimum P(profit) to allow trade
+ML_CONFIDENCE_THRESHOLD = 0.55 # Minimum P(profit) to allow trade (lowered from 0.60 for aggression)
 
 # ── Institutional Execution (V23) ────────────────────────────
 LIMIT_ORDER_TIMEOUT_SEC = 30   # Seconds to wait for Limit order fill before cancel
@@ -140,8 +140,8 @@ WEIGHT_MACRO     = 0.10
 WEIGHT_WHALE     = 0.00
 
 # Composite thresholds
-COMPOSITE_BUY_THRESHOLD  =  0.25      # V22: lowered from 0.35 for more trades
-COMPOSITE_SELL_THRESHOLD = -0.25      # V22: lowered from -0.35
+COMPOSITE_BUY_THRESHOLD  =  0.15      # V22: lowered from 0.25 for more trades
+COMPOSITE_SELL_THRESHOLD = -0.15      # V22: lowered from -0.25
 
 # ── Circuit Breaker ──────────────────────────────────────────
 MAX_CONSECUTIVE_LOSSES = 3

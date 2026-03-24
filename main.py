@@ -1,8 +1,9 @@
 """
-Hunter V17 — Main Loop
+Hunter V31 — Main Loop
 ========================
 Orchestrator: fetches asynchronous data via BinanceProvider → analyses → decides → executes.
 
+V31: Rust Core Integration (Kalman Filter & OrderBook Engine).
 V17: Async I/O refactoring, MarketState dataclass to fix parameter bloat.
 V16: Persistence, Kelly Criterion, fees, StochRSI, Vol confirm.
 V15: Short positions, funding rate sentiment, trailing SL.
@@ -479,7 +480,7 @@ async def _statarb_monitor_loop():
 async def run_auto():
     """Auto Mode: scan top pairs + held positions, loop over them asynchronously."""
     logger.info("==============================================")
-    logger.info("  HUNTER V19 — WSS Auto Mode Started")
+    logger.info("  HUNTER V31 — Rust Core HFT Mode Started")
     logger.info("==============================================")
 
     trader = LiveTrader() if LIVE_TRADING else PaperTrader()

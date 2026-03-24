@@ -67,6 +67,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from signal_journal import init_journal, log_signal
 from signal_analyzer import run_weekly_analysis
 from strategy_router import StrategyRouter
+from portfolio_risk import PortfolioManager
 
 # ─────────────────────────────────────────────────────────────
 # Global Instances
@@ -286,6 +287,19 @@ async def run_cycle(
             logger.warning("   ⛔ OBI BLOCKED SHORT: Heavy Bid wall detected in Depth20 (OBI %+.2f)", obi)
             action = "HOLD"
 
+    # V29 Phase 1: Portfolio Correlation VaR Gate
+    if action in ["BUY", "SHORT"] and not trader.has_position(symbol):
+        if hasattr(trader, 'portfolio_manager'):
+            is_safe = await trader.portfolio_manager.check_trade_correlation(
+                new_symbol=symbol,
+                target_side=action,
+                current_positions=trader.positions,
+                provider=provider
+            )
+            if not is_safe:
+                logger.warning("   🛡️ PORTFOLIO VaR BLOCKED: %s %s heavily correlated with open positions", action, symbol)
+                action = "HOLD"
+
     # V26/V27: Diagnostic Signal Pipeline Log
     original_action = signal_dict.get("action", "HOLD")
     strategy_name = signal_dict.get("strategy", "None")
@@ -324,7 +338,7 @@ async def run_cycle(
 
     # 9. Execute with latency tracking
     with TelemetryManager.track_latency():
-        result = trader.execute_trade(action, current_price, symbol, atr=atr)
+        result = trader.execute_trade(action, current_price, symbol, atr=atr, provider=provider)
         if inspect.iscoroutine(result):
             result = await result
             

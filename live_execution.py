@@ -319,7 +319,7 @@ class LiveTrader(PaperTrader):
 
     # ── ASYNC OVERRIDES ────────────────────────────────────────────────────────
 
-    async def execute_trade(self, signal: str, current_price: float, symbol: str, atr: float = 0.0) -> Dict:
+    async def execute_trade(self, signal: str, current_price: float, symbol: str, atr: float = 0.0, provider=None) -> Dict:
         """
         Async orchestration of the PaperTrader cycle logic.
         """
@@ -357,14 +357,14 @@ class LiveTrader(PaperTrader):
 
         # ── OPEN LONG
         if signal == "BUY" and symbol not in self.positions:
-            return await self._open_position(symbol, current_price, "BUY", atr, result)
+            return await self._open_position(symbol, current_price, "BUY", atr, result, provider)
 
         # ── OPEN SHORT
         if signal == "SHORT" and symbol not in self.positions:
             if not SHORT_ENABLED:
                 result["action"] = "SHORTS_DISABLED"
                 return result
-            return await self._open_position(symbol, current_price, "SELL", atr, result)
+            return await self._open_position(symbol, current_price, "SELL", atr, result, provider)
 
         # ── CLOSE LONG
         if signal == "SELL" and symbol in self.positions:
@@ -378,7 +378,7 @@ class LiveTrader(PaperTrader):
 
         return result
 
-    async def _open_position(self, symbol: str, current_price: float, side: str, atr: float, result: Dict) -> Dict:
+    async def _open_position(self, symbol: str, current_price: float, side: str, atr: float, result: Dict, provider=None) -> Dict:
         if len(self.positions) >= MAX_OPEN_POSITIONS:
             result["action"] = "MAX_POSITIONS_REACHED"
             return result
@@ -415,16 +415,55 @@ class LiveTrader(PaperTrader):
         if atr > 0:
             tp_mult = ATR_TP_MULTIPLIER
             if DYNAMIC_TP_ENABLED:
-                # If market is already explosive, allow larger TP to ride the wave.
-                # In V24 Phase 2 we dynamically scale TP up to 10x ATR if conditions are extreme.
-                # Currently using a static wide dynamic modifier, to be refined with 'market_state' in Phase 4.
                 tp_mult = min(DYNAMIC_TP_MAX_MULT, ATR_TP_MULTIPLIER * 1.5)
             
+            # V29 Phase 2: Dynamic OrderBook Stop-Loss
+            # Check the L2 Cache to see if we can hide our STOP LOSS behind a massive wall
+            sl_adjusted = False
+            base_sl = entry - atr * ATR_SL_MULTIPLIER if side == "BUY" else entry + atr * ATR_SL_MULTIPLIER
+            
+            if provider and getattr(provider, 'depth_cache', None) and symbol in provider.depth_cache:
+                depth = provider.depth_cache[symbol]
+                
+                if side == "BUY":
+                    # Look for massive BID wall to place stop exactly 1 tick below it
+                    bids = sorted(depth.get('bids', []), key=lambda x: x[0], reverse=True)
+                    # We want walls below entry but above base_sl
+                    valid_bids = [b for b in bids if base_sl < b[0] < entry]
+                    if valid_bids:
+                        # Find the largest limit wall within the ATR radius
+                        largest_wall = max(valid_bids, key=lambda x: x[1])
+                        wall_price, wall_size = largest_wall
+                        
+                        info = await self._get_symbol_info(symbol)
+                        tick = info.get('tickSize', 0.01)
+                        # Hide the SL one tick behind the wall
+                        stop_loss = wall_price - tick
+                        sl_adjusted = True
+                        logger.info("   🛡️ ORDERBOOK SL: Tucked BUY Stop-Loss behind huge Bid Wall at %.4f (Size: %.2f). Base SL was %.4f", wall_price, wall_size, base_sl)
+                        
+                else:
+                    # Look for massive ASK wall to place stop exactly 1 tick above it
+                    asks = sorted(depth.get('asks', []), key=lambda x: x[0])
+                    # We want walls above entry but below base_sl
+                    valid_asks = [a for a in asks if entry < a[0] < base_sl]
+                    if valid_asks:
+                        largest_wall = max(valid_asks, key=lambda x: x[1])
+                        wall_price, wall_size = largest_wall
+                        
+                        info = await self._get_symbol_info(symbol)
+                        tick = info.get('tickSize', 0.01)
+                        # Hide the SL one tick behind the wall
+                        stop_loss = wall_price + tick
+                        sl_adjusted = True
+                        logger.info("   🛡️ ORDERBOOK SL: Tucked SHORT Stop-Loss behind huge Ask Wall at %.4f (Size: %.2f). Base SL was %.4f", wall_price, wall_size, base_sl)
+
+            if not sl_adjusted:
+                stop_loss = base_sl
+                
             if side == "BUY":
-                stop_loss = entry - atr * ATR_SL_MULTIPLIER
                 take_profit = entry + atr * tp_mult
             else:
-                stop_loss = entry + atr * ATR_SL_MULTIPLIER
                 take_profit = entry - atr * tp_mult
 
         pos = {

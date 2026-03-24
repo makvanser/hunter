@@ -194,7 +194,9 @@ class BinanceProvider:
                                 
                                 self.depth_cache[symbol] = {
                                     'deep_bid_vol': bid_vol,
-                                    'deep_ask_vol': ask_vol
+                                    'deep_ask_vol': ask_vol,
+                                    'bids': [(float(p), float(q)) for p, q in data['b']],
+                                    'asks': [(float(p), float(q)) for p, q in data['a']]
                                 }
                         elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                             break

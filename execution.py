@@ -86,6 +86,10 @@ class PaperTrader:
                 list(self.positions.keys()),
             )
 
+        # V29 Phase 1: Portfolio Correlation Risk Manager
+        from portfolio_risk import PortfolioManager
+        self.portfolio_manager = PortfolioManager()
+
         logger.info(
             "PaperTrader V16 initialised | balance=$%.2f | db=%s",
             self.balance,

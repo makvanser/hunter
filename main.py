@@ -74,6 +74,7 @@ from portfolio_risk import PortfolioManager
 # ─────────────────────────────────────────────────────────────
 ml_filter = MLFilter()
 strategy_router = StrategyRouter()
+statarb_engine = StatArbEngine()
 
 # Global state for V29 Microstructure
 PREV_OBI: Dict[str, float] = {}
@@ -103,6 +104,7 @@ async def run_cycle(
     provider: BinanceProvider,
     prefetched_data: Dict = None,
     ml_filter: MLFilter = None,
+    statarb_engine: StatArbEngine = None,
 ) -> Dict:
     """Execute one analysis-and-trade cycle asynchronously for a given symbol."""
     logger.info("─" * 60)
@@ -304,8 +306,16 @@ async def run_cycle(
     CVD_LAST_TIME[symbol] = now
     CVD_LAST_VALUE[symbol] = cvd_value
 
+    # V30 Phase 4: Kalman StatArb (Alt vs BTC)
+    kalman_z = 0.0
+    if statarb_engine and symbol != "BTCUSDT":
+        btc_price = provider.get_last_price("BTCUSDT")
+        if btc_price > 0:
+            kalman_z = statarb_engine.get_kalman_zscore(symbol, current_price, btc_price)
+
     if action in ["BUY", "SHORT"]:
-        logger.info("   🔬 Micro: OBI=%+.2f (Δ%+.2f) | Spread=%.3f%% | CVD_S=%.1f", obi, obi_delta, spread, cvd_slope)
+        logger.info("   🔬 Micro: OBI=%+.2f (Δ%+.2f) | Spread=%.3f%% | CVD_S=%.1f | KalmanZ=%+.2f", 
+                    obi, obi_delta, spread, cvd_slope, kalman_z)
         
         if action == "BUY" and obi < -0.30:
             logger.warning("   ⛔ OBI BLOCKED BUY: Heavy Ask wall detected in Depth20 (OBI %+.2f)", obi)
@@ -318,6 +328,7 @@ async def run_cycle(
     market_state.obi_delta = obi_delta
     market_state.bid_ask_spread = spread
     market_state.cvd_slope = cvd_slope
+    market_state.kalman_zscore = kalman_z
 
     # V29 Phase 1: Portfolio Correlation VaR Gate
     if action in ["BUY", "SHORT"] and not trader.has_position(symbol):
@@ -434,7 +445,7 @@ async def run_pair_wss(symbol: str, provider: BinanceProvider, trader, ml_filter
                     market_closes_cache[symbol] = data['closes'][-200:]
                     
                     # 2. Zero-latency execution using the cached auxiliary data!
-                    await run_cycle(trader, symbol, social_manager, macro_manager, provider, prefetched_data=data, ml_filter=ml_filter)
+                    await run_cycle(trader, symbol, social_manager, macro_manager, provider, prefetched_data=data, ml_filter=ml_filter, statarb_engine=statarb_engine)
                     
                     # 2.5 V28 Phase 2 CVD Reset
                     provider.reset_cvd(symbol)

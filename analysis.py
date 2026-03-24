@@ -102,6 +102,7 @@ class MarketState:
     obi_delta: float = 0.0
     cvd_slope: float = 0.0
     bid_ask_spread: float = 0.0
+    kalman_zscore: float = 0.0
 
 
 # ─────────────────────────────────────────────────────────────
@@ -626,7 +627,6 @@ def compute_composite_score(state: MarketState) -> float:
     """
     Weighted scoring model [-1 to +1] (V16 revised).
     Positive = Bullish, Negative = Bearish.
-    Uses the MarketState dataclass to prevent parameter bloat.
     """
     score = 0.0
 

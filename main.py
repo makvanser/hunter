@@ -429,6 +429,10 @@ async def run_auto():
         try:
             top_pairs = await provider.scan_top_pairs()
             
+            # WSS Execution Warmup (V28 Phase 3)
+            if LIVE_TRADING and hasattr(trader, 'connect_ws'):
+                await trader.connect_ws()
+            
             # Active positions must always be monitored
             for sym in trader.positions.keys():
                 if sym not in top_pairs:

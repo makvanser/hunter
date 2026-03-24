@@ -13,6 +13,8 @@ import hashlib
 import aiohttp
 import asyncio
 import logging
+import json
+import uuid
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 
@@ -51,6 +53,11 @@ class LiveTrader(PaperTrader):
         self._initial_balance = INITIAL_BALANCE_USD  # fallback until first sync
         self._symbol_infoCache: Dict[str, Dict[str, float]] = {}
         
+        # V28 Phase 3: WebSocket Execution RPC
+        self.ws_execution = None
+        self.ws_listening_task = None
+        self.ws_futures: Dict[str, asyncio.Future] = {}
+        
         logger.info("✅ LiveTrader initialized for %s", "TESTNET" if USE_TESTNET else "MAINNET")
         
         # Note: balance is automatically fetched asynchronously later during the cycle.
@@ -67,67 +74,85 @@ class LiveTrader(PaperTrader):
         ).hexdigest()
         return signature
 
+    async def connect_ws(self):
+        """V28 Phase 3: Establish a persistent RPC WebSocket connection for orders."""
+        if self.ws_execution and not self.ws_execution.closed:
+            return
+            
+        ws_url = "wss://testnet.binancefuture.com/ws-fapi/v1" if USE_TESTNET else "wss://ws-fapi.binance.com/ws-fapi/v1"
+        logger.info("🔌 Connecting Execution WS to %s...", ws_url)
+        
+        try:
+            self.ws_session = aiohttp.ClientSession()
+            self.ws_execution = await self.ws_session.ws_connect(ws_url, timeout=30)
+            logger.info("🟢 Execution WS Connected successfully!")
+            self.ws_listening_task = asyncio.create_task(self._ws_listen_loop())
+        except Exception as e:
+            logger.error("❌ Failed to connect Execution WS: %s", e)
+
+    async def _ws_listen_loop(self):
+        """Continuously listen for responses from the WebSocket and resolve Futures."""
+        try:
+            async for msg in self.ws_execution:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    data = json.loads(msg.data)
+                    req_id = data.get('id')
+                    if req_id and req_id in self.ws_futures:
+                        if not self.ws_futures[req_id].done():
+                            self.ws_futures[req_id].set_result(data)
+                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                    break
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error("❌ Execution WS Listen Loop Error: %s", e)
+        finally:
+            logger.warning("🟠 Execution WS Disconnected! Reconnecting...")
+            self.ws_execution = None
+            asyncio.create_task(self.connect_ws())
+
+    async def _ws_request(self, method: str, params: Dict[str, Any]) -> Dict:
+        """Send a signed WS API request and wait for the response."""
+        if not self.ws_execution or self.ws_execution.closed:
+            await self.connect_ws()
+            
+        req_id = str(uuid.uuid4())
+        fut = asyncio.Future()
+        self.ws_futures[req_id] = fut
+        
+        params['apiKey'] = API_KEY
+        params['timestamp'] = int(time.time() * 1000)
+        params['signature'] = self._sign_payload(params)
+        
+        payload = {
+            "id": req_id,
+            "method": method,
+            "params": params
+        }
+        
+        try:
+            await self.ws_execution.send_json(payload)
+            # Wait for response with timeout
+            response = await asyncio.wait_for(fut, timeout=10.0)
+            
+            # The WS API returns actual data in the 'result' field, and errors in 'error'
+            if "error" in response:
+                err = response["error"]
+                logger.error("❌ WS Exec Error [%s]: %s", method, err)
+                return {"error": err}
+                
+            return response.get("result", response)
+            
+        except asyncio.TimeoutError:
+            logger.error("⏱️ WS Exec Timeout waiting for %s %s", method, req_id)
+            return {"error": "Timeout"}
+        except Exception as e:
+            logger.error("❌ WS Exec Failed %s: %s", method, e)
+            return {"error": str(e)}
+        finally:
+            self.ws_futures.pop(req_id, None)
+
     async def _api_post(self, endpoint: str, payload: Dict[str, Any]) -> Dict:
-        """Internal helper for signed POST requests."""
-        payload['timestamp'] = int(time.time() * 1000)
-        payload['signature'] = self._sign_payload(payload)
-        url = f"{BASE_URL}{endpoint}"
-        
-        headers = {"X-MBX-APIKEY": API_KEY, "Content-Type": "application/x-www-form-urlencoded"}
-        
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(url, headers=headers, data=payload) as response:
-                    data = await response.json()
-                    if response.status != 200:
-                        logger.error("❌ Binance API Error [%s]: %s", response.status, data.get('msg', data))
-                        return {"error": data}
-                    return data
-            except Exception as e:
-                logger.error("❌ Async HTTP Error on %s: %s", endpoint, e)
-                return {"error": str(e)}
-
-    async def _api_get(self, endpoint: str, params: Dict[str, Any]) -> Dict:
-        """Internal helper for signed GET requests."""
-        params['timestamp'] = int(time.time() * 1000)
-        params['signature'] = self._sign_payload(params)
-        url = f"{BASE_URL}{endpoint}"
-        
-        headers = {"X-MBX-APIKEY": API_KEY}
-        
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.get(url, headers=headers, params=params) as response:
-                    data = await response.json()
-                    if response.status != 200:
-                        logger.error("❌ Binance API Error [%s]: %s", response.status, data.get('msg', data))
-                        return {"error": data}
-                    return data
-            except Exception as e:
-                logger.error("❌ Async HTTP Error on GET %s: %s", endpoint, e)
-                return {"error": str(e)}
-
-    async def _api_delete(self, endpoint: str, params: Dict[str, Any]) -> Dict:
-        """Internal helper for signed DELETE requests."""
-        params['timestamp'] = int(time.time() * 1000)
-        params['signature'] = self._sign_payload(params)
-        url = f"{BASE_URL}{endpoint}"
-        
-        headers = {"X-MBX-APIKEY": API_KEY, "Content-Type": "application/x-www-form-urlencoded"}
-        
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.delete(url, headers=headers, params=params) as response:
-                    data = await response.json()
-                    if response.status != 200:
-                        logger.error("❌ Binance API Error [%s]: %s", response.status, data.get('msg', data))
-                        return {"error": data}
-                    return data
-            except Exception as e:
-                logger.error("❌ Async HTTP Error on DELETE %s: %s", endpoint, e)
-                return {"error": str(e)}
-
-    async def sync_balance(self) -> float:
         """Fetch USDT balance from Binance Futures."""
         payload = {'timestamp': int(time.time() * 1000)}
         payload['signature'] = self._sign_payload(payload)
@@ -186,9 +211,9 @@ class LiveTrader(PaperTrader):
         return "error" not in res
 
     async def open_market_order(self, symbol: str, side: str, quantity: float) -> float:
-        """Place a market order. Return executed price."""
+        """Place a market order using WS API. Return executed price."""
         payload = {"symbol": symbol, "side": side, "type": "MARKET", "quantity": str(quantity)}
-        res = await self._api_post("/fapi/v1/order", payload)
+        res = await self._ws_request("order.place", payload)
         if "error" in res:
             logger.error("💥 Failed to open %s market order: %s", side, res)
             return -1.0
@@ -196,13 +221,12 @@ class LiveTrader(PaperTrader):
         order_id = res.get("orderId")
         avg_price = float(res.get('avgPrice', 0) or 0)
         
-        # Binance testnet often returns avgPrice = 0.0 for immediate REST responses. Polling actual fill state:
         if avg_price == 0.0 and order_id:
             await asyncio.sleep(0.5)
-            check = await self._api_get("/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
+            check = await self._ws_request("order.status", {"symbol": symbol, "orderId": order_id})
             avg_price = float(check.get('avgPrice', 0) or 0)
             
-        logger.info("🚀 LIVE ORDER EXECUTED: %s %s size=%s", side, symbol, quantity)
+        logger.info("🚀 LIVE ORDER EXECUTED (WS): %s %s size=%s", side, symbol, quantity)
         return avg_price
 
     def _round_to_step(self, value: float, step: float) -> str:
@@ -243,7 +267,7 @@ class LiveTrader(PaperTrader):
                 "symbol": symbol, "side": side, "type": "LIMIT", "timeInForce": "GTX",
                 "quantity": o["qty"], "price": o["price"]
             }
-            res = await self._api_post("/fapi/v1/order", payload)
+            res = await self._ws_request("order.place", payload)
             if "orderId" in res:
                 order_ids.append(res["orderId"])
             else:
@@ -262,10 +286,10 @@ class LiveTrader(PaperTrader):
         while time.time() - start_time < timeout:
             await asyncio.sleep(1)
             
-            # Poll all active orders
+            # Poll all active orders via WS
             active_ids = list(order_ids) # copy
             for oid in active_ids:
-                check = await self._api_get("/fapi/v1/order", {"symbol": symbol, "orderId": oid})
+                check = await self._ws_request("order.status", {"symbol": symbol, "orderId": oid})
                 status = check.get("status")
                 
                 if status == "FILLED":
@@ -274,14 +298,14 @@ class LiveTrader(PaperTrader):
                     filled_qty += exec_qty
                     total_spent += exec_qty * avg_px
                     order_ids.remove(oid) # Done tracking this chunk
-                    logger.info("🚀 GRID CHUNK EXECUTED: %s %s size=%s @ %.4f", side, symbol, exec_qty, avg_px)
+                    logger.info("🚀 GRID CHUNK EXECUTED (WS): %s %s size=%s @ %.4f", side, symbol, exec_qty, avg_px)
                     
             if not order_ids:
                 break # All filled!
                 
         # Cancel remaining
         for oid in order_ids:
-            await self._api_delete("/fapi/v1/order", {"symbol": symbol, "orderId": oid})
+            await self._ws_request("order.cancel", {"symbol": symbol, "orderId": oid})
             
         if filled_qty > 0:
             final_avg_price = total_spent / filled_qty

@@ -770,7 +770,8 @@ def _generate_signal_core(state: MarketState, current_position: Optional[Union[s
         
         # Bullish signal
         # V22: Relaxed rsi_slope from >0 to >=-2 to catch early reversals
-        if score > COMPOSITE_BUY_THRESHOLD and not state.near_resistance:
+        # V26: Grid bots WANT to trade near S/R levels (bounce zones)
+        if score > COMPOSITE_BUY_THRESHOLD and (MAKER_GRID_ENABLED or not state.near_resistance):
             if not VOLUME_CONFIRM_ENABLED or state.volume_confirm:
                 if state.rsi_slope >= -2:
                     if pos_side is None:

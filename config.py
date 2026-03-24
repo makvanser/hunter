@@ -11,7 +11,7 @@ V16: Persistent positions, fees/slippage, position caps, Kelly, StochRSI,
 
 # ── Trading defaults ─────────────────────────────────────────
 SYMBOL = "BTCUSDT"           # Default / fallback symbol
-TIMEFRAME = "1h"             # Primary kline interval
+TIMEFRAME = "15m"            # V26: 15m for Grid bots (4× more signals than 1h)
 KLINE_LIMIT = 200            # V16: 200 bars (was 100) — enough for all indicators
 
 # ── Binance Futures API ─────────────────────────────────────
@@ -94,7 +94,7 @@ MULTI_TF_INTERVALS = ["15m", "1h", "4h"]
 MTF_AGREEMENT_MIN = 2
 
 # ── Volume Confirmation (V16) ────────────────────────────────
-VOLUME_CONFIRM_ENABLED = True  # Require rising volume on BUY signals
+VOLUME_CONFIRM_ENABLED = False # V26: Disabled for Grid mode (grid doesn't need trend volume)
 VOLUME_CONFIRM_BARS = 3        # Compare last N bars vs previous period
 
 # ── Position Sizing & Risk (V16 / V24 Auto-Compounding) ───────
@@ -157,8 +157,8 @@ WEIGHT_MACRO     = 0.10
 WEIGHT_WHALE     = 0.00
 
 # Composite thresholds
-COMPOSITE_BUY_THRESHOLD  =  0.15      # V22: lowered from 0.25 for more trades
-COMPOSITE_SELL_THRESHOLD = -0.15      # V22: lowered from -0.25
+COMPOSITE_BUY_THRESHOLD  =  0.10      # V26: lowered from 0.15 for grid frequency
+COMPOSITE_SELL_THRESHOLD = -0.10      # V26: lowered from -0.15
 
 # ── Circuit Breaker ──────────────────────────────────────────
 MAX_CONSECUTIVE_LOSSES = 3

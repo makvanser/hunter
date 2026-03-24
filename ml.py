@@ -32,13 +32,13 @@ except ImportError:
 
 from config import (
     ATR_SL_MULTIPLIER, ATR_TP_MULTIPLIER,
+    ML_CONFIDENCE_THRESHOLD,
 )
 
 logger = logging.getLogger("hunter.ml")
 
 # ── Configuration ─────────────────────────────────────────────
 ML_MODEL_PATH = "ml_model.pkl"
-ML_CONFIDENCE_THRESHOLD = 0.60   # Minimum P(profit) to allow trade
 LOOKAHEAD_BARS = 12              # How many bars ahead to evaluate outcome
 MIN_PROFIT_PCT = 0.3             # Minimum % move to count as "profitable"
 

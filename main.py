@@ -261,6 +261,15 @@ async def run_cycle(
             logger.warning("   ⛔ OBI BLOCKED SHORT: Heavy Bid wall detected in Depth20 (OBI %+.2f)", obi)
             action = "HOLD"
 
+    # V26: Diagnostic Signal Pipeline Log
+    original_action = signal_dict.get("action", "HOLD")
+    ml_prob = getattr(ml_filter, 'last_probability', 0.0) if ml_filter else 0.0
+    logger.info(
+        "SIGNAL_PIPELINE: %s → composite=%s(%.3f) → ML=%.0f%% → OBI=%+.2f → final=%s",
+        symbol, original_action, signal_dict.get("composite_score", 0.0),
+        ml_prob * 100, obi, action
+    )
+
     # 9. Execute with latency tracking
     with TelemetryManager.track_latency():
         result = trader.execute_trade(action, current_price, symbol, atr=atr)

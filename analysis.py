@@ -95,6 +95,7 @@ class MarketState:
     near_resistance: bool
     btc_correlation: float
     btc_dominance: float
+    cvd: float = 0.0
 
 
 # ─────────────────────────────────────────────────────────────

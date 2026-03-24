@@ -32,6 +32,7 @@ class BinanceProvider:
         self.session = None
         self.bbo_cache: Dict[str, Dict[str, float]] = {}  # V23 Phase 2
         self.depth_cache: Dict[str, Dict[str, float]] = {} # V24 Phase 3
+        self.cvd_cache: Dict[str, float] = {}  # V28 Phase 2 (Cumulative Volume Delta)
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession(
@@ -222,6 +223,47 @@ class BinanceProvider:
             return 0.0
             
         return (bids - asks) / total
+
+    async def stream_agg_trades(self, symbol: str) -> None:
+        """
+        V28 Phase 2: Connects to Binance @aggTrade WSS.
+        Calculates real-time Cumulative Volume Delta (CVD) for the current candle.
+        """
+        url = f"wss://fstream.binance.com/ws/{symbol.lower()}@aggTrade"
+        logger.info("🔌 Initializing CVD WSS connection to %s", url)
+        self.cvd_cache[symbol] = 0.0
+        
+        while True:
+            try:
+                async with self.session.ws_connect(url, timeout=30) as ws:
+                    logger.info("🟢 CVD WSS Connected for %s", symbol)
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            data = json.loads(msg.data)
+                            if 'm' in data and 'q' in data and 'p' in data:
+                                # 'm' (is_buyer_maker) = True means it was a SELL order (maker was buyer)
+                                # 'm' = False means it was a BUY order
+                                vol_usd = float(data['q']) * float(data['p'])
+                                if data['m']:
+                                    self.cvd_cache[symbol] -= vol_usd
+                                else:
+                                    self.cvd_cache[symbol] += vol_usd
+                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                            break
+            except asyncio.CancelledError:
+                logger.info("🛑 CVD WSS stream cancelled for %s.", symbol)
+                raise
+            except Exception as e:
+                logger.error("❌ CVD WSS Error on %s: %s. Reconnecting in 5s...", symbol, e)
+                await asyncio.sleep(5)
+
+    def get_cvd(self, symbol: str) -> float:
+        """Return the current Cumulative Volume Delta (USD) for the symbol."""
+        return self.cvd_cache.get(symbol, 0.0)
+
+    def reset_cvd(self, symbol: str) -> None:
+        """Reset the CVD for the symbol (call this on candle close)."""
+        self.cvd_cache[symbol] = 0.0
 
     async def fetch_open_interest_delta(self, symbol: str) -> float:
         """Fetch % % change in Open Interest over the last hour."""

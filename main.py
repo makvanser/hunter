@@ -208,8 +208,9 @@ async def run_cycle(
     bb_range = upper - lower
     bb_position = (current_price - lower) / bb_range if bb_range > 0 else 0.5
 
-    # 7. Create MarketState (V17 refactoring)
     atr_pct = (atr / current_price * 100) if current_price else 0.0
+    cvd_value = provider.get_cvd(symbol) if hasattr(provider, 'get_cvd') else 0.0
+    
     market_state = MarketState(
         current_price=current_price,
         rsi=rsi,
@@ -231,7 +232,8 @@ async def run_cycle(
         volume_confirm=volume_confirm,
         near_resistance=near_resistance,
         btc_correlation=btc_corr,
-        btc_dominance=btc_dom
+        btc_dominance=btc_dom,
+        cvd=cvd_value
     )
 
     # 8. Strategy Router Evaluation (V27 Multi-Strategy)
@@ -367,6 +369,9 @@ async def run_pair_wss(symbol: str, provider: BinanceProvider, trader, social_ma
                     # 2. Zero-latency execution using the cached auxiliary data!
                     await run_cycle(trader, symbol, social_manager, macro_manager, provider, prefetched_data=data, ml_filter=ml_filter)
                     
+                    # 2.5 V28 Phase 2 CVD Reset
+                    provider.reset_cvd(symbol)
+                    
                     # 3. Refresh auxiliary data AFTER execution so it's ready for the next candle!
                     aux = await provider.fetch_all_market_data(symbol, MULTI_TF_INTERVALS)
                     data.update({k: v for k, v in aux.items() if k not in ['highs', 'lows', 'closes', 'volumes']})
@@ -453,6 +458,7 @@ async def run_auto():
             for sym in top_pairs:
                 tasks.append(run_pair_wss(sym, provider, trader, social_manager, macro_manager, ml_filter))
                 tasks.append(provider.stream_depth(sym)) # V24 Phase 3: Depth20 instead of BBO
+                tasks.append(provider.stream_agg_trades(sym)) # V28 Phase 2: Tick Data / CVD
             
             tasks.append(_statarb_monitor_loop()) # V24 Phase 4: Background pairs monitor
             

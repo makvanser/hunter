@@ -75,6 +75,12 @@ from portfolio_risk import PortfolioManager
 ml_filter = MLFilter()
 strategy_router = StrategyRouter()
 
+# Global state for V29 Microstructure
+PREV_OBI: Dict[str, float] = {}
+CVD_LAST_TIME: Dict[str, float] = {}
+CVD_LAST_VALUE: Dict[str, float] = {}
+market_closes_cache: Dict[str, List[float]] = {}
+
 # ─────────────────────────────────────────────────────────────
 # Logging
 # ─────────────────────────────────────────────────────────────
@@ -277,8 +283,29 @@ async def run_cycle(
     # V24 Phase 3: Using Deep OBI (Top 20 levels) instead of BBO for true wall detection
     obi = provider.get_deep_obi(symbol)
     TelemetryManager.set_deep_obi(symbol, obi)
+    
+    # V29 Phase 3: OBI Delta (Acceleration)
+    prev_obi = PREV_OBI.get(symbol, obi)
+    obi_delta = obi - prev_obi
+    PREV_OBI[symbol] = obi
+
+    # V29 Phase 3: Bid/Ask Spread
+    bbo = provider.get_bbo(symbol)
+    spread = 0.0
+    if bbo:
+        spread = (bbo['ask_price'] - bbo['bid_price']) / bbo['bid_price'] * 100 if bbo['bid_price'] > 0 else 0.0
+
+    # V29 Phase 3: CVD Slope (Intensity of flow)
+    now = time.time()
+    last_t = CVD_LAST_TIME.get(symbol, now - 60)
+    last_v = CVD_LAST_VALUE.get(symbol, cvd_value)
+    dt = now - last_t
+    cvd_slope = (cvd_value - last_v) / dt if dt > 0 else 0.0
+    CVD_LAST_TIME[symbol] = now
+    CVD_LAST_VALUE[symbol] = cvd_value
+
     if action in ["BUY", "SHORT"]:
-        logger.info("   🔬 Deep Microstructure: OBI=%+.2f", obi)
+        logger.info("   🔬 Micro: OBI=%+.2f (Δ%+.2f) | Spread=%.3f%% | CVD_S=%.1f", obi, obi_delta, spread, cvd_slope)
         
         if action == "BUY" and obi < -0.30:
             logger.warning("   ⛔ OBI BLOCKED BUY: Heavy Ask wall detected in Depth20 (OBI %+.2f)", obi)
@@ -286,6 +313,11 @@ async def run_cycle(
         elif action == "SHORT" and obi > 0.30:
             logger.warning("   ⛔ OBI BLOCKED SHORT: Heavy Bid wall detected in Depth20 (OBI %+.2f)", obi)
             action = "HOLD"
+
+    market_state.obi = obi
+    market_state.obi_delta = obi_delta
+    market_state.bid_ask_spread = spread
+    market_state.cvd_slope = cvd_slope
 
     # V29 Phase 1: Portfolio Correlation VaR Gate
     if action in ["BUY", "SHORT"] and not trader.has_position(symbol):
@@ -329,6 +361,9 @@ async def run_cycle(
         blocked_by=blocked_by,
         ml_confidence=ml_prob,
         obi=obi,
+        obi_delta=obi_delta,
+        cvd_slope=cvd_slope,
+        bid_ask_spread=spread,
         rsi=market_state.rsi,
         adx={"CHOPPY": 15.0, "TRENDING": 30.0, "STRONG_UP": 45.0, "STRONG_DOWN": 45.0}.get(market_state.regime, 20.0),
         atr_pct=market_state.atr_pct,
@@ -377,7 +412,7 @@ async def run_manual(symbol: str):
         logger.info("==============================================")
 
 
-async def run_pair_wss(symbol: str, provider: BinanceProvider, trader, social_manager: SocialManager, macro_manager: MacroManager, ml_filter: MLFilter = None):
+async def run_pair_wss(symbol: str, provider: BinanceProvider, trader, ml_filter: MLFilter = None, macro_manager: MacroManager = None, strategy_router=None):
     """Handles persistent WSS stream for a specific pair."""
     logger.info("📡 Starting Zero-Latency WSS listener for %s", symbol)
     while True:
@@ -414,9 +449,6 @@ async def run_pair_wss(symbol: str, provider: BinanceProvider, trader, social_ma
         except Exception as e:
             logger.error("❌ WSS Crash on %s: %s. Restarting...", symbol, e)
             await asyncio.sleep(5)
-
-# Global cache for StatArb
-market_closes_cache: Dict[str, List[float]] = {}
 
 async def _statarb_monitor_loop():
     engine = StatArbEngine(z_score_threshold=2.5)

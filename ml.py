@@ -68,21 +68,26 @@ class MLFilter:
         self.last_probability = 0.5
         
         self.feature_names = [
-            # Microstructure (not in composite)
-            "funding_rate_velocity",   # Rate of change of funding over 8h
-            "oi_acceleration",         # 2nd derivative of Open Interest
-            "volume_delta_norm",       # (Buy Vol - Sell Vol) / Total Vol
-            "spread_proxy",            # Proxy: ATR / Price (liquidity indicator)
-            # Price action (derived, not raw indicators)
-            "price_vs_vwap_zscore",    # Z-score of price deviation from VWAP
-            "price_momentum_10bar",    # Rate of change over 10 bars
-            "price_momentum_30bar",    # Longer-term momentum
-            "volatility_ratio",        # Current ATR / 50-bar avg ATR
-            # Temporal features
-            "hour_sin", "hour_cos",    # Cyclical intraday
-            "day_sin", "day_cos",      # Cyclical weekly
+            # V29 Microstructure (High-Freq)
+            "obi_current",             # Deep L2 Imbalance
+            "obi_delta",               # OBI Acceleration
+            "cvd_slope",               # Intensity of aggTrade flow
+            "bid_ask_spread",          # Real-time liquidity cost
+            # Microstructure
+            "funding_rate_velocity",
+            "oi_acceleration",
+            "vol_delta_norm",
+            "spread_proxy",
+            # Price action
+            "price_vs_vwap_zscore",
+            "price_momentum_10bar",
+            "price_momentum_30bar",
+            "volatility_ratio",
+            # Temporal
+            "hour_sin", "hour_cos",
+            "day_sin", "day_cos",
             # Cross-asset
-            "btc_rsi_divergence",      # This coin's RSI - BTC's RSI (approximated)
+            "btc_rsi_divergence",
         ]
 
         if not ML_AVAILABLE:
@@ -161,15 +166,25 @@ class MLFilter:
             # BTC RSI divergence (approximated: compare RSI to "normal" BTC RSI ~50)
             btc_rsi_div = (market_state.rsi - 50.0) / 50.0  # Simplified
 
+            # ── V29 Microstructure (High-Freq) ──
+            obi_current = getattr(market_state, 'obi', 0.0)
+            obi_delta   = getattr(market_state, 'obi_delta', 0.0)
+            cvd_slope   = getattr(market_state, 'cvd_slope', 0.0) / 1000.0 # Normalize: $1k/sec = 1.0
+            spread_real = getattr(market_state, 'bid_ask_spread', 0.0)
+
             features = np.array([
+                obi_current,
+                obi_delta * 5.0,     # Amplify acceleration signal
+                cvd_slope,
+                spread_real * 10.0,  # 0.1% = 1.0
                 funding_velocity,
                 oi_acceleration,
                 vol_delta,
                 spread_proxy,
                 vwap_zscore,
-                mom_10 / 10.0,       # Normalize: 10% = 1.0
-                mom_30 / 20.0,       # Normalize: 20% = 1.0
-                vol_ratio / 5.0,     # Normalize
+                mom_10 / 10.0,
+                mom_30 / 20.0,
+                vol_ratio / 5.0,
                 hour_sin,
                 hour_cos,
                 day_sin,
@@ -358,7 +373,7 @@ class MLFilter:
             joblib.dump({
                 "models": self.models,
                 "feature_names": self.feature_names,
-                "version": "V26",
+                "version": "V29",
             }, path)
             logger.info("💾 ML V26 ensemble saved to %s (%d models)", path, len(self.models))
 

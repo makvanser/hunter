@@ -38,6 +38,9 @@ def init_journal():
             blocked_by TEXT,
             ml_confidence REAL,
             obi REAL,
+            obi_delta REAL,
+            cvd_slope REAL,
+            bid_ask_spread REAL,
             rsi REAL,
             adx REAL,
             atr_pct REAL,
@@ -62,6 +65,9 @@ def log_signal(
     blocked_by: Optional[str],
     ml_confidence: float,
     obi: float,
+    obi_delta: float,
+    cvd_slope: float,
+    bid_ask_spread: float,
     rsi: float,
     adx: float,
     atr_pct: float,
@@ -74,8 +80,9 @@ def log_signal(
         conn.execute(
             """INSERT INTO signals 
                (timestamp, symbol, composite_score, original_action, final_action,
-                blocked_by, ml_confidence, obi, rsi, adx, atr_pct, regime, price_at_signal)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                blocked_by, ml_confidence, obi, obi_delta, cvd_slope, bid_ask_spread,
+                rsi, adx, atr_pct, regime, price_at_signal)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 datetime.now(timezone.utc).isoformat(),
                 symbol,
@@ -85,6 +92,9 @@ def log_signal(
                 blocked_by,
                 round(ml_confidence, 4),
                 round(obi, 4),
+                round(obi_delta, 4),
+                round(cvd_slope, 2),
+                round(bid_ask_spread, 4),
                 round(rsi, 2),
                 round(adx, 2),
                 round(atr_pct, 3),

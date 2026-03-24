@@ -97,6 +97,11 @@ class MarketState:
     btc_dominance: float
     cvd: float = 0.0
     btc_spread_zscore: float = 0.0
+    # V29 Phase 3: High-Freq Microstructure
+    obi: float = 0.0
+    obi_delta: float = 0.0
+    cvd_slope: float = 0.0
+    bid_ask_spread: float = 0.0
 
 
 # ─────────────────────────────────────────────────────────────

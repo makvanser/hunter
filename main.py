@@ -66,11 +66,13 @@ from telemetry import TelemetryManager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from signal_journal import init_journal, log_signal
 from signal_analyzer import run_weekly_analysis
+from strategy_router import StrategyRouter
 
 # ─────────────────────────────────────────────────────────────
-# Global ML Filter instance
+# Global Instances
 # ─────────────────────────────────────────────────────────────
 ml_filter = MLFilter()
+strategy_router = StrategyRouter()
 
 # ─────────────────────────────────────────────────────────────
 # Logging
@@ -232,9 +234,10 @@ async def run_cycle(
         btc_dominance=btc_dom
     )
 
-    # 8. Generate signal
+    # 8. Strategy Router Evaluation (V27 Multi-Strategy)
     pos = trader.get_position(symbol)
-    signal_dict = generate_signal(market_state, current_position=pos, use_composite=True, detailed=True)
+    pos_side = pos["side"] if pos else None
+    signal_dict = strategy_router.evaluate(market_state, current_position=pos_side)
 
     # 8.5 ML Filter Gate (V22 Phase 6)
     action = signal_dict.get("action", "HOLD")
@@ -263,12 +266,13 @@ async def run_cycle(
             logger.warning("   ⛔ OBI BLOCKED SHORT: Heavy Bid wall detected in Depth20 (OBI %+.2f)", obi)
             action = "HOLD"
 
-    # V26: Diagnostic Signal Pipeline Log
+    # V26/V27: Diagnostic Signal Pipeline Log
     original_action = signal_dict.get("action", "HOLD")
+    strategy_name = signal_dict.get("strategy", "None")
     ml_prob = getattr(ml_filter, 'last_probability', 0.0) if ml_filter else 0.0
     logger.info(
-        "SIGNAL_PIPELINE: %s → composite=%s(%.3f) → ML=%.0f%% → OBI=%+.2f → final=%s",
-        symbol, original_action, signal_dict.get("composite_score", 0.0),
+        "ROUTER [%s]: %s → %s(%.2f) → ML=%.0f%% → OBI=%+.2f → final=%s",
+        strategy_name, symbol, original_action, signal_dict.get("confidence", 0.0),
         ml_prob * 100, obi, action
     )
 

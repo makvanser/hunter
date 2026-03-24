@@ -25,8 +25,8 @@ except ImportError:
 LIVE_TRADING = str(os.getenv("LIVE_TRADING", "True")).strip().lower() in ("true", "1", "t", "yes")
 USE_TESTNET = str(os.getenv("USE_TESTNET", "True")).strip().lower() in ("true", "1", "t", "yes")
 
-API_KEY = os.getenv("BINANCE_API_KEY", "pcaM7VgCSD8iOrcq1vpqrq7L41kw2HdojfRK6vSXc8uJxREjkRhPjMvShyNIo5O9")
-API_SECRET = os.getenv("BINANCE_API_SECRET", "CpG0vk1MCKceaJhKDO3IwQzTC8ETxYOfFozOl677zj6IVaYWrysv76pHmRq7kT0S")
+API_KEY = os.getenv("BINANCE_API_KEY", "")
+API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 
 if LIVE_TRADING and USE_TESTNET:
     BASE_URL = "https://testnet.binancefuture.com"
@@ -146,12 +146,12 @@ LS_RATIO_THRESHOLD = 0.8
 WHALE_NET_VOL_MIN = 0
 
 # ── Composite Signal Weights (V16) ───────────────────────────
-WEIGHT_RSI       = 0.25
+WEIGHT_RSI       = 0.20
 WEIGHT_MACD      = 0.20
 WEIGHT_BOLLINGER = 0.15
-WEIGHT_FUNDING   = 0.15
+WEIGHT_FUNDING   = 0.10
 WEIGHT_MTF       = 0.10
-WEIGHT_SOCIAL    = 0.15
+WEIGHT_SOCIAL    = 0.10
 WEIGHT_LS_RATIO  = 0.05
 WEIGHT_MACRO     = 0.10
 WEIGHT_WHALE     = 0.00

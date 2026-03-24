@@ -96,6 +96,7 @@ class MarketState:
     btc_correlation: float
     btc_dominance: float
     cvd: float = 0.0
+    btc_spread_zscore: float = 0.0
 
 
 # ─────────────────────────────────────────────────────────────

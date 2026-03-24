@@ -193,6 +193,23 @@ async def run_cycle(
     btc_dom = await macro_manager.get_btc_dominance()
     btc_corr = await macro_manager.get_btc_correlation(symbol, provider)
 
+    # V28 Phase 4: StatArb Spread Z-Score
+    btc_spread_zscore = 0.0
+    if symbol != "BTCUSDT" and hasattr(macro_manager, 'btc_closes_cache') and macro_manager.btc_closes_cache:
+        import math
+        min_len = min(len(closes), len(macro_manager.btc_closes_cache))
+        if min_len >= 20:
+            sym_slice = closes[-min_len:]
+            btc_slice = macro_manager.btc_closes_cache[-min_len:]
+            
+            ratios = [s / b if b > 0 else 0 for s, b in zip(sym_slice, btc_slice)]
+            mean_ratio = sum(ratios) / len(ratios)
+            std_ratio = math.sqrt(sum((r - mean_ratio)**2 for r in ratios) / len(ratios))
+            
+            if std_ratio > 0:
+                btc_spread_zscore = (ratios[-1] - mean_ratio) / std_ratio
+                logger.info("   ⚖️ StatArb: %s vs BTC Z-Score = %+.2f", symbol, btc_spread_zscore)
+
     # 6. Compute MTF Agreement
     mtf_scores = []
     for tf, tf_closes in data["mtf_closes"].items():
@@ -233,7 +250,8 @@ async def run_cycle(
         near_resistance=near_resistance,
         btc_correlation=btc_corr,
         btc_dominance=btc_dom,
-        cvd=cvd_value
+        cvd=cvd_value,
+        btc_spread_zscore=btc_spread_zscore
     )
 
     # 8. Strategy Router Evaluation (V27 Multi-Strategy)

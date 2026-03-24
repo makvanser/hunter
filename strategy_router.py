@@ -132,6 +132,38 @@ class FundingArbStrategy(BaseStrategy):
         return action, conf
 
 
+class StatArbStrategy(BaseStrategy):
+    """
+    V28 Phase 4: Statistical Arbitrage against BTC.
+    Trades the spread between the Altcoin and Bitcoin. 
+    If Z-Score > 2.5, the Altcoin is overpriced relative to BTC -> SHORT.
+    If Z-Score < -2.5, the Altcoin is underpriced relative to BTC -> BUY.
+    Requires highly correlated pairs (BTC correlation > 0.75).
+    """
+    name = "StatArb"
+    best_regimes = ["CHOPPY", "TRENDING", "STRONG_UP", "STRONG_DOWN"]
+
+    def evaluate(self, state: MarketState, current_position: Optional[str] = None) -> Tuple[str, float]:
+        action = "HOLD"
+        conf = 0.0
+
+        # Only trade highly correlated assets
+        if state.btc_correlation < 0.75:
+            return action, conf
+
+        # Altcoin is heavily OVERVALUED relative to its historical beta to BTC
+        if state.btc_spread_zscore > 2.5:
+            action = "SHORT"
+            conf = min(1.0, (state.btc_spread_zscore - 2.0) / 2.0) 
+
+        # Altcoin is heavily UNDERVALUED relative to its historical beta to BTC
+        elif state.btc_spread_zscore < -2.5:
+            action = "BUY"
+            conf = min(1.0, (abs(state.btc_spread_zscore) - 2.0) / 2.0)
+
+        return action, conf
+
+
 class StrategyRouter:
     """
     Evaluates all registered strategies and selects the best signal.
@@ -141,7 +173,8 @@ class StrategyRouter:
             GridStrategy(),
             MomentumStrategy(),
             MeanReversionStrategy(),
-            FundingArbStrategy()
+            FundingArbStrategy(),
+            StatArbStrategy()
         ]
         self.min_confidence = 0.50
 

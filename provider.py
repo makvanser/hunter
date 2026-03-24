@@ -9,7 +9,7 @@ import asyncio
 import logging
 import time
 import json
-from typing import Dict, List, Optional, Any, AsyncGenerator, Optional
+from typing import Dict, List, Tuple, Optional, Any, AsyncGenerator
 
 try:
     from hunter_core import OrderBook

@@ -7,8 +7,17 @@ Strictly separated from Trading/Analysis logic (Single Responsibility Principle)
 
 import asyncio
 import logging
+import time
 import json
-from typing import Dict, List, Tuple, Any, AsyncGenerator, Optional
+from typing import Dict, List, Optional, Any, AsyncGenerator, Optional
+
+try:
+    from hunter_core import OrderBook
+except ImportError:
+    # Minimal fallback placeholder
+    class OrderBook: 
+        def update(self, b, a): pass
+        def get_obi(self): return 0.0
 
 import aiohttp
 
@@ -31,8 +40,9 @@ class BinanceProvider:
         # We will share a single session for all requests in a cycle
         self.session = None
         self.bbo_cache: Dict[str, Dict[str, float]] = {}  # V23 Phase 2
-        self.depth_cache: Dict[str, Dict[str, float]] = {} # V24 Phase 3
+        self.depth_cache: Dict[str, Dict] = {}
         self.cvd_cache: Dict[str, float] = {}  # V28 Phase 2 (Cumulative Volume Delta)
+        self.rust_orderbooks: Dict[str, OrderBook] = {}
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession(
@@ -189,14 +199,20 @@ class BinanceProvider:
                             data = json.loads(msg.data)
                             if 'b' in data and 'a' in data:
                                 # Data format: 'b': [[price, qty], [price, qty]...], 'a': [...]
-                                bid_vol = sum(float(level[1]) for level in data['b'])
-                                ask_vol = sum(float(level[1]) for level in data['a'])
+                                bids_data = [[float(p), float(q)] for p, q in data['b']]
+                                asks_data = [[float(p), float(q)] for p, q in data['a']]
                                 
+                                # Use Rust engine for OBI
+                                if symbol not in self.rust_orderbooks:
+                                    self.rust_orderbooks[symbol] = OrderBook()
+                                
+                                self.rust_orderbooks[symbol].update(bids_data, asks_data)
+
                                 self.depth_cache[symbol] = {
-                                    'deep_bid_vol': bid_vol,
-                                    'deep_ask_vol': ask_vol,
-                                    'bids': [(float(p), float(q)) for p, q in data['b']],
-                                    'asks': [(float(p), float(q)) for p, q in data['a']]
+                                    'deep_bid_vol': sum(l[1] for l in bids_data),
+                                    'deep_ask_vol': sum(l[1] for l in asks_data),
+                                    'bids': bids_data,
+                                    'asks': asks_data
                                 }
                         elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                             break
@@ -213,6 +229,9 @@ class BinanceProvider:
         OBI = (BidVol - AskVol) / (BidVol + AskVol)
         Returns a float between -1.0 (Heavy Sell Walls) and +1.0 (Heavy Buy Walls).
         """
+        if symbol in self.rust_orderbooks:
+            return self.rust_orderbooks[symbol].get_obi()
+            
         depth = self.depth_cache.get(symbol)
         if not depth:
             return 0.0

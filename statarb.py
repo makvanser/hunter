@@ -6,7 +6,10 @@ Calculates the Z-Score of the spread between two assets.
 """
 
 from typing import Dict, List, Tuple, Optional
-from kalman import KalmanFilter
+try:
+    from hunter_core import KalmanFilter
+except ImportError:
+    from kalman import KalmanFilter
 
 class StatArbEngine:
     def __init__(self, z_score_threshold: float = 2.0):

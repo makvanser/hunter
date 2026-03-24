@@ -1,0 +1,20 @@
+[package]
+name = "hunter_core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "hunter_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+# PyO3 for Python bindings
+pyo3 = { version = "0.22.0", features = ["extension-module"] }
+# Fast N-dimensional arrays (like Numpy)
+ndarray = "0.15.0"
+# Thread-safe once-cell for singletons if needed
+once_cell = "1.19.0"
+
+[build-dependencies]
+# Required by some pyo3 setups
+# maturin = "1.0.0"

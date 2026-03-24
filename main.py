@@ -434,7 +434,7 @@ async def run_auto():
             scheduler.add_job(
                 learner.retrain_model_walk_forward, 
                 'cron', day_of_week='sun', hour=0, minute=0,
-                args=[top_pairs[:10], 336]
+                args=[top_pairs[:10], 1344]
             )
             # V26: Weekly Signal Analysis (Sundays at 02:00)
             scheduler.add_job(

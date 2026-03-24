@@ -453,12 +453,20 @@ async def run_auto():
             scheduler.start()
             logger.info("📅 Scheduled: ML Retraining (Sun 00:00) + Signal Analysis (Sun 02:00)")
             
+            # Staggered startup to avoid hitting Binance REST API rate limit and WSS connection limit
+            async def _staggered_start(symbol, index):
+                await asyncio.sleep(index * 0.3)  # 300ms delay between each pair startup
+                # Run the main run_cycle WSS loop, plus the two auxiliary streams
+                await asyncio.gather(
+                    run_pair_wss(symbol, provider, trader, social_manager, macro_manager, ml_filter),
+                    provider.stream_depth(symbol),
+                    provider.stream_agg_trades(symbol)
+                )
+
             # Run persistent WSS tasks concurrently indefinitely
             tasks = []
-            for sym in top_pairs:
-                tasks.append(run_pair_wss(sym, provider, trader, social_manager, macro_manager, ml_filter))
-                tasks.append(provider.stream_depth(sym)) # V24 Phase 3: Depth20 instead of BBO
-                tasks.append(provider.stream_agg_trades(sym)) # V28 Phase 2: Tick Data / CVD
+            for i, sym in enumerate(top_pairs):
+                tasks.append(_staggered_start(sym, i))
             
             tasks.append(_statarb_monitor_loop()) # V24 Phase 4: Background pairs monitor
             

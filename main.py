@@ -64,6 +64,8 @@ from learner import ContinuousLearner
 from statarb import StatArbEngine
 from telemetry import TelemetryManager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from signal_journal import init_journal, log_signal
+from signal_analyzer import run_weekly_analysis
 
 # ─────────────────────────────────────────────────────────────
 # Global ML Filter instance
@@ -270,6 +272,32 @@ async def run_cycle(
         ml_prob * 100, obi, action
     )
 
+    # V26: Signal Journal — record EVERY signal for weekly analysis
+    blocked_by = None
+    if original_action != action:
+        if original_action != "HOLD":
+            # Determine which filter blocked it
+            if ml_filter and hasattr(ml_filter, 'last_probability') and ml_filter.last_probability < 0.51:
+                blocked_by = "ML"
+            elif abs(obi) > 0.30:
+                blocked_by = "OBI"
+            else:
+                blocked_by = "OTHER"
+    log_signal(
+        symbol=symbol,
+        composite_score=signal_dict.get("composite_score", 0.0),
+        original_action=original_action,
+        final_action=action,
+        blocked_by=blocked_by,
+        ml_confidence=ml_prob,
+        obi=obi,
+        rsi=market_state.rsi,
+        adx={"CHOPPY": 15.0, "TRENDING": 30.0, "STRONG_UP": 45.0, "STRONG_DOWN": 45.0}.get(market_state.regime, 20.0),
+        atr_pct=market_state.atr_pct,
+        regime=market_state.regime,
+        price_at_signal=current_price,
+    )
+
     # 9. Execute with latency tracking
     with TelemetryManager.track_latency():
         result = trader.execute_trade(action, current_price, symbol, atr=atr)
@@ -374,6 +402,7 @@ async def run_auto():
     social_manager = SocialManager()
     macro_manager = MacroManager()
     ml_filter.load()  # Load pre-trained model if available
+    init_journal()     # V26: Initialize Signal Journal DB
     
     # Expose Prometheus HTTP Metrics Endpoint
     TelemetryManager.start_server(port=8000)
@@ -407,8 +436,13 @@ async def run_auto():
                 'cron', day_of_week='sun', hour=0, minute=0,
                 args=[top_pairs[:10], 336]
             )
+            # V26: Weekly Signal Analysis (Sundays at 02:00)
+            scheduler.add_job(
+                run_weekly_analysis,
+                'cron', day_of_week='sun', hour=2, minute=0,
+            )
             scheduler.start()
-            logger.info("📅 ML Continuous Learning Pipeline Scheduled (Sundays @ 00:00)")
+            logger.info("📅 Scheduled: ML Retraining (Sun 00:00) + Signal Analysis (Sun 02:00)")
             
             # Run persistent WSS tasks concurrently indefinitely
             tasks = []

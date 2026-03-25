@@ -1,8 +1,9 @@
 """
-Hunter V31 — Main Loop
-========================
-Orchestrator: fetches asynchronous data via BinanceProvider → analyses → decides → executes.
+Hunter V32 — Institutional Risk Management Edition
+==================================================
+Orchestrator: fetches asynchronous data via BinanceProvider -> analyses -> decides -> executes.
 
+V32: Tick-Level SL, HWM Drawdown, Exchange SL, Execute Analytics, ADF StatArb Filter.
 V31: Rust Core Integration (Kalman Filter & OrderBook Engine).
 V17: Async I/O refactoring, MarketState dataclass to fix parameter bloat.
 V16: Persistence, Kelly Criterion, fees, StochRSI, Vol confirm.
@@ -436,6 +437,7 @@ async def run_pair_wss(symbol: str, provider: BinanceProvider, trader, ml_filter
         try:
             # Prime data via REST
             data = await provider.fetch_all_market_data(symbol, MULTI_TF_INTERVALS)
+            current_atr = 0.0
             
             # V31: Skip symbols that return no data (delisted/unavailable)
             if not data.get('closes'):
@@ -462,12 +464,22 @@ async def run_pair_wss(symbol: str, provider: BinanceProvider, trader, ml_filter
                     # 2. Zero-latency execution using the cached auxiliary data!
                     await run_cycle(trader, symbol, social_manager, macro_manager, provider, prefetched_data=data, ml_filter=ml_filter, statarb_engine=statarb_engine)
                     
+                    # Compute ATR to be used for tick-level trailing SL tracking until the next candle
+                    from analysis import compute_atr, ATR_PERIOD
+                    current_atr = compute_atr(data['highs'], data['lows'], data['closes'], ATR_PERIOD)
+                    
                     # 2.5 V28 Phase 2 CVD Reset
                     provider.reset_cvd(symbol)
                     
                     # 3. Refresh auxiliary data AFTER execution so it's ready for the next candle!
                     aux = await provider.fetch_all_market_data(symbol, MULTI_TF_INTERVALS)
                     data.update({k: v for k, v in aux.items() if k not in ['highs', 'lows', 'closes', 'volumes']})
+                
+                # V32: Tick-Level Check
+                # Runs on EVERY message from the WS (multiple times per second)
+                if hasattr(trader, 'handle_tick') and trader.has_position(symbol):
+                    mark_px = provider.get_last_price(symbol) or float(kline['c'])
+                    await trader.handle_tick(symbol, mark_px, current_atr)
                     
         except asyncio.CancelledError:
             logger.info("🛑 WSS Loop cancelled for %s", symbol)
@@ -554,11 +566,12 @@ async def run_auto():
             # Staggered startup to avoid hitting Binance REST API rate limit and WSS connection limit
             async def _staggered_start(symbol, index):
                 await asyncio.sleep(index * 0.3)  # 300ms delay between each pair startup
-                # Run the main run_cycle WSS loop, plus the two auxiliary streams
+                # Run the main run_cycle WSS loop, plus the auxiliary streams
                 await asyncio.gather(
                     run_pair_wss(symbol, provider, trader, social_manager, macro_manager, ml_filter),
                     provider.stream_depth(symbol),
-                    provider.stream_agg_trades(symbol)
+                    provider.stream_agg_trades(symbol),
+                    provider.stream_mark_price(symbol),  # V32: Tick-level price for SL
                 )
 
             # Run persistent WSS tasks concurrently indefinitely

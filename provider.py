@@ -43,6 +43,7 @@ class BinanceProvider:
         self.depth_cache: Dict[str, Dict] = {}
         self.cvd_cache: Dict[str, float] = {}  # V28 Phase 2 (Cumulative Volume Delta)
         self.rust_orderbooks: Dict[str, OrderBook] = {}
+        self.last_price_cache: Dict[str, float] = {}  # V32: Tick-level price tracking
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession(
@@ -286,6 +287,32 @@ class BinanceProvider:
     def reset_cvd(self, symbol: str) -> None:
         """Reset the CVD for the symbol (call this on candle close)."""
         self.cvd_cache[symbol] = 0.0
+
+    def get_last_price(self, symbol: str) -> float:
+        """V32: Return the latest tick-level mark price for a symbol."""
+        return self.last_price_cache.get(symbol, 0.0)
+
+    async def stream_mark_price(self, symbol: str) -> None:
+        """
+        V32: Connects to Binance @markPrice WSS (updates every 1s).
+        Provides tick-level price data for real-time SL monitoring.
+        """
+        url = f"wss://fstream.binance.com/ws/{symbol.lower()}@markPrice@1s"
+        
+        while True:
+            try:
+                async with self.session.ws_connect(url, timeout=30) as ws:
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            data = json.loads(msg.data)
+                            if 'p' in data:
+                                self.last_price_cache[symbol] = float(data['p'])
+                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                            break
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await asyncio.sleep(5)
 
     async def fetch_open_interest_delta(self, symbol: str) -> float:
         """Fetch % % change in Open Interest over the last hour."""

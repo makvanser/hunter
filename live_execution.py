@@ -229,6 +229,52 @@ class LiveTrader(PaperTrader):
         logger.info("🚀 LIVE ORDER EXECUTED (WS): %s %s size=%s", side, symbol, quantity)
         return avg_price
 
+    async def place_exchange_sl(self, symbol: str, side: str, quantity: float, stop_price: float) -> bool:
+        """
+        V32: Place a real STOP_MARKET order on Binance as a safety net.
+        This ensures the exchange closes the position even if the bot crashes.
+        
+        Args:
+            side: The CLOSING side ("SELL" for longs, "BUY" for shorts)
+            stop_price: The price at which the stop triggers
+        """
+        # First cancel any existing SL orders for this symbol
+        await self._cancel_all_sl_orders(symbol)
+        
+        info = await self._get_symbol_info(symbol)
+        qty_str = self._round_to_step(quantity, info['stepSize'])
+        price_str = self._round_to_step(stop_price, info['tickSize'])
+        
+        payload = {
+            "symbol": symbol,
+            "side": side,
+            "type": "STOP_MARKET",
+            "quantity": qty_str,
+            "stopPrice": price_str,
+            "closePosition": "true",
+            "workingType": "MARK_PRICE"
+        }
+        
+        res = await self._ws_request("order.place", payload)
+        if "error" in res:
+            logger.error("❌ Failed to place exchange SL for %s: %s", symbol, res)
+            return False
+        
+        logger.info("🛡️ EXCHANGE SL PLACED: %s %s @ %.4f (orderId=%s)", 
+                    side, symbol, stop_price, res.get('orderId', '?'))
+        return True
+
+    async def _cancel_all_sl_orders(self, symbol: str) -> None:
+        """Cancel all open STOP_MARKET orders for a symbol before placing a new one."""
+        res = await self._ws_request("openOrders.status", {"symbol": symbol})
+        if isinstance(res, list):
+            for order in res:
+                if order.get('type') == 'STOP_MARKET' and order.get('status') == 'NEW':
+                    await self._ws_request("order.cancel", {
+                        "symbol": symbol, "orderId": order['orderId']
+                    })
+                    logger.debug("🗑️ Cancelled old SL order %s for %s", order['orderId'], symbol)
+
     def _round_to_step(self, value: float, step: float) -> str:
         """Round value to the nearest step size, returning a clean string for Binance."""
         if step <= 0: return str(value)
@@ -319,6 +365,49 @@ class LiveTrader(PaperTrader):
 
     # ── ASYNC OVERRIDES ────────────────────────────────────────────────────────
 
+    async def handle_tick(self, symbol: str, current_price: float, atr: float = 0.0) -> Optional[Dict]:
+        """
+        V32: Lightweight tick monitor. Checks for SL/TP and updates trailing SL 
+        without syncing balances or making unnecessary REST checks. 
+        Returns result dict only if a position was closed.
+        """
+        if symbol not in self.positions:
+            return None
+            
+        result: Dict = {
+            "action":    "NONE",
+            "signal":    "TICK_UPDATE",
+            "symbol":    symbol,
+            "price":     current_price,
+            "pnl":       0.0,
+            "blocked":   False,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        # 1. Update Trailing SL (Synchronous logic + async exchange sync)
+        if atr > 0:
+            old_sl = self.positions[symbol].get('stop_loss')
+            self._update_trailing_sl(symbol, current_price, atr)
+            new_sl = self.positions[symbol].get('stop_loss')
+            
+            # If trailing SL moved, update the exchange-side STOP_MARKET order
+            if new_sl and old_sl and new_sl != old_sl:
+                pos = self.positions[symbol]
+                close_side = "SELL" if pos['side'] == "BUY" else "BUY"
+                qty = pos.get('quantity', 0)
+                if qty > 0:
+                    asyncio.create_task(self.place_exchange_sl(symbol, close_side, qty, new_sl))
+
+        # 2. Check Software SL/TP hit (e.g. for Take-Profits or if exchange SL failed)
+        sl_tp_trigger = self.check_sl_tp(symbol, current_price)
+        if sl_tp_trigger is not None:
+            logger.info("⚡ TICK-LEVEL TRIGGER: %s hit on %s at $%.4f", sl_tp_trigger, symbol, current_price)
+            # Fetch balance right before closing
+            await self.sync_balance()
+            return await self._close_position(symbol, current_price, result, sl_tp_trigger)
+            
+        return None
+
     async def execute_trade(self, signal: str, current_price: float, symbol: str, atr: float = 0.0, provider=None) -> Dict:
         """
         Async orchestration of the PaperTrader cycle logic.
@@ -341,9 +430,18 @@ class LiveTrader(PaperTrader):
             result["action"], result["blocked"] = "BLOCKED_BY_CIRCUIT_BREAKER", True
             return result
 
-        # Gate 2: Trailing SL update (Synchronous)
+        # Gate 2: Trailing SL update + V32: Sync exchange SL when trailing stop moves
         if atr > 0 and symbol in self.positions:
+            old_sl = self.positions[symbol].get('stop_loss')
             self._update_trailing_sl(symbol, current_price, atr)
+            new_sl = self.positions[symbol].get('stop_loss')
+            # If trailing SL moved, update the exchange-side STOP_MARKET order
+            if new_sl and old_sl and new_sl != old_sl:
+                pos = self.positions[symbol]
+                close_side = "SELL" if pos['side'] == "BUY" else "BUY"
+                qty = pos.get('quantity', 0)
+                if qty > 0:
+                    await self.place_exchange_sl(symbol, close_side, qty, new_sl)
 
         # Gate 3: SL/TP auto-close check (Synchronous check, Async execution)
         sl_tp_trigger = self.check_sl_tp(symbol, current_price)
@@ -388,15 +486,20 @@ class LiveTrader(PaperTrader):
         # V25: Always use Kelly-based sizing (1/4 Kelly conservative model)
         size_usd = self._kelly_position_size()
         
-        # Hard cap: never exceed MAX_RISK_PER_TRADE_PCT of balance * leverage
-        max_risk_usd = self.balance * (MAX_RISK_PER_TRADE_PCT / 100.0) * LEVERAGE
+        # Hard cap: never exceed MAX_RISK_PER_TRADE_PCT of balance
+        max_risk_usd = self.balance * (MAX_RISK_PER_TRADE_PCT / 100.0)
         size_usd = min(size_usd, max_risk_usd, MAX_EXPOSURE_USD - total_exposure)
 
-        if size_usd < 100:
-            size_usd = 3000.0  # Binance testnet minimal limit
+        # V32: Sane minimum (Binance min notional is ~$5 for most pairs)
+        if size_usd < 5.0:
+            result["action"] = "INSUFFICIENT_BALANCE"
+            logger.warning("⚠️ Position size $%.2f too small for %s. Skipping.", size_usd, symbol)
+            return result
 
-        # Submit to Binance API
-        quantity = round(size_usd / current_price, 3)
+        # V32: Leverage-aware quantity calculation
+        # size_usd = margin. Notional = margin * leverage.
+        notional = size_usd * LEVERAGE
+        quantity = round(notional / current_price, 3)
         if quantity <= 0: quantity = 0.001
         
         if USE_TESTNET and quantity < 0.05:
@@ -482,14 +585,27 @@ class LiveTrader(PaperTrader):
         result["size_usd"] = size_usd
         result["stop_loss"] = stop_loss
         result["take_profit"] = take_profit
-
+        
+        # V32: Slippage Analytics
+        slippage = (entry - current_price) / current_price * 100.0 if side == "BUY" else (current_price - entry) / current_price * 100.0
+        result["slippage_pct"] = slippage
+        
         direction = "📈" if side == "BUY" else "📉"
-        logger.info("%s API: %s %s @ %.4f | SL=%.4f | TP=%.4f | balance=$%.2f",
-                    direction, result["action"], symbol, entry, stop_loss or 0, take_profit or 0, self.balance)
+        logger.info("%s API: %s %s @ %.4f (Slippage: %.3f%%) | SL=%.4f | balance=$%.2f",
+                    direction, result["action"], symbol, entry, slippage, stop_loss or 0, self.balance)
+        
+        # V32: Place REAL exchange-side Stop-Loss as safety net
+        if stop_loss and quantity > 0:
+            close_side = "SELL" if side == "BUY" else "BUY"
+            await self.place_exchange_sl(symbol, close_side, quantity, stop_loss)
+        
         return result
 
     async def _close_position(self, symbol: str, current_price: float, result: Dict, reason: str) -> Dict:
         pos = self.positions[symbol]
+        
+        # V32: Cancel exchange-side SL before closing to prevent double execution
+        await self._cancel_all_sl_orders(symbol)
         
         # API execution to close
         close_side = "SELL" if pos["side"] == "BUY" else "BUY"
@@ -506,7 +622,8 @@ class LiveTrader(PaperTrader):
 
         trade_id = log_trade(
             side=close_side, price=exit_price, size_usd=pos["size_usd"],
-            pnl=pnl, db_path=self.db_path, symbol=symbol
+            pnl=pnl, db_path=self.db_path, symbol=symbol,
+            slippage=slippage
         )
 
         del self.positions[symbol]
@@ -517,6 +634,10 @@ class LiveTrader(PaperTrader):
         result["trade_id"] = trade_id
         result["reason"] = reason
 
-        logger.info("💰 API: %s %s @ %.4f | PnL=$%.4f | reason=%s | balance=$%.2f",
-                    result["action"], symbol, exit_price, pnl, reason, self.balance)
+        # V32: Slippage Analytics
+        slippage = (current_price - exit_price) / current_price * 100.0 if close_side == "SELL" else (exit_price - current_price) / current_price * 100.0
+        result["slippage_pct"] = slippage
+
+        logger.info("💰 API: %s %s @ %.4f (Slippage: %.3f%%) | PnL=$%.4f | reason=%s | balance=$%.2f",
+                    result["action"], symbol, exit_price, slippage, pnl, reason, self.balance)
         return result

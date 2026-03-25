@@ -74,6 +74,7 @@ class PaperTrader:
 
         self.db_path = db_path or DB_PATH
         self.balance = INITIAL_BALANCE_USD
+        self.balance_hwm = INITIAL_BALANCE_USD  # V32: High Water Mark for drawdown
 
         init_db(self.db_path)
 
@@ -99,14 +100,16 @@ class PaperTrader:
     # ── Safety Gate (GLOBAL) ──────────────────────────────────
     def check_circuit_breaker(self) -> bool:
         """Return True if trading is ALLOWED, False if blocked."""
-        # V22: Global drawdown guard
-        # Use actual exchange balance as reference for LiveTrader (testnet/mainnet)
-        ref_balance = getattr(self, '_initial_balance', INITIAL_BALANCE_USD)
-        drawdown_pct = (ref_balance - self.balance) / ref_balance * 100 if ref_balance > 0 else 0
+        # V32: Update High Water Mark
+        if self.balance > self.balance_hwm:
+            self.balance_hwm = self.balance
+        
+        # V32: Drawdown from High Water Mark (not initial balance)
+        drawdown_pct = (self.balance_hwm - self.balance) / self.balance_hwm * 100 if self.balance_hwm > 0 else 0
         if drawdown_pct >= MAX_DRAWDOWN_PCT:
             logger.warning(
-                "🚨 GLOBAL DRAWDOWN BREAKER — balance $%.2f is %.1f%% below initial (limit %.1f%%)",
-                self.balance, drawdown_pct, MAX_DRAWDOWN_PCT,
+                "🚨 GLOBAL DRAWDOWN BREAKER — balance $%.2f is %.1f%% below HWM $%.2f (limit %.1f%%)",
+                self.balance, drawdown_pct, self.balance_hwm, MAX_DRAWDOWN_PCT,
             )
             return False
 
@@ -524,6 +527,7 @@ class PaperTrader:
             pnl=pnl,
             db_path=self.db_path,
             symbol=symbol,
+            slippage=SLIPPAGE * 100.0,
         )
 
         # V16: Remove from persistent positions

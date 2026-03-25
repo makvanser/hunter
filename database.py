@@ -47,7 +47,8 @@ def init_db(db_path: str = DB_PATH) -> None:
             price       REAL    NOT NULL,
             size_usd    REAL    NOT NULL,
             pnl         REAL    DEFAULT 0,
-            status      TEXT    DEFAULT 'OPEN'
+            status      TEXT    DEFAULT 'OPEN',
+            slippage_pct REAL   DEFAULT 0.0
         )
     """)
 
@@ -56,6 +57,12 @@ def init_db(db_path: str = DB_PATH) -> None:
         c.execute("ALTER TABLE trades ADD COLUMN symbol TEXT NOT NULL DEFAULT 'UNKNOWN'")
     except sqlite3.OperationalError:
         pass  # Column already exists
+        
+    # V32 migration: add slippage_pct for execution analytics
+    try:
+        c.execute("ALTER TABLE trades ADD COLUMN slippage_pct REAL DEFAULT 0.0")
+    except sqlite3.OperationalError:
+        pass
 
     # V16: Persistent positions table — survives bot restarts
     c.execute("""
@@ -110,6 +117,7 @@ def log_trade(
     pnl: float,
     db_path: str = DB_PATH,
     symbol: str = "UNKNOWN",
+    slippage: float = 0.0,
 ) -> int:
     """
     Record a completed trade and update the consecutive-loss counter.
@@ -120,9 +128,9 @@ def log_trade(
 
     now = datetime.now(timezone.utc).isoformat()
     c.execute(
-        "INSERT INTO trades (timestamp, symbol, side, price, size_usd, pnl, status) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (now, symbol, side, price, size_usd, pnl, "CLOSED"),
+        "INSERT INTO trades (timestamp, symbol, side, price, size_usd, pnl, status, slippage_pct) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (now, symbol, side, price, size_usd, pnl, "CLOSED", slippage),
     )
     trade_id = c.lastrowid
 

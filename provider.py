@@ -44,6 +44,7 @@ class BinanceProvider:
         self.cvd_cache: Dict[str, float] = {}  # V28 Phase 2 (Cumulative Volume Delta)
         self.rust_orderbooks: Dict[str, OrderBook] = {}
         self.last_price_cache: Dict[str, float] = {}  # V32: Tick-level price tracking
+        self.volume_profile: Dict[str, Dict[float, float]] = {}  # V33: VPVR histogram
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession(
@@ -266,11 +267,19 @@ class BinanceProvider:
                             if 'm' in data and 'q' in data and 'p' in data:
                                 # 'm' (is_buyer_maker) = True means it was a SELL order (maker was buyer)
                                 # 'm' = False means it was a BUY order
-                                vol_usd = float(data['q']) * float(data['p'])
+                                price = float(data['p'])
+                                qty = float(data['q'])
+                                vol_usd = qty * price
                                 if data['m']:
                                     self.cvd_cache[symbol] -= vol_usd
                                 else:
                                     self.cvd_cache[symbol] += vol_usd
+                                
+                                # V33: Aggregate Volume Profile (0.1% price buckets)
+                                bucket = round(price / (price * 0.001)) * (price * 0.001)
+                                if symbol not in self.volume_profile:
+                                    self.volume_profile[symbol] = {}
+                                self.volume_profile[symbol][bucket] = self.volume_profile[symbol].get(bucket, 0.0) + vol_usd
                         elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                             break
             except asyncio.CancelledError:
@@ -291,6 +300,25 @@ class BinanceProvider:
     def get_last_price(self, symbol: str) -> float:
         """V32: Return the latest tick-level mark price for a symbol."""
         return self.last_price_cache.get(symbol, 0.0)
+
+    def get_vpvr_poc(self, symbol: str) -> float:
+        """V33: Return the Point of Control (highest volume price level)."""
+        profile = self.volume_profile.get(symbol, {})
+        if not profile:
+            return 0.0
+        return max(profile, key=profile.get)
+
+    def get_vpvr_support_resistance(self, symbol: str, current_price: float, n: int = 3) -> tuple:
+        """V33: Return top N volume nodes as (supports_below, resistances_above)."""
+        profile = self.volume_profile.get(symbol, {})
+        if not profile:
+            return [], []
+        
+        # Sort by volume descending, take top N*2 levels
+        top_levels = sorted(profile.items(), key=lambda x: x[1], reverse=True)[:n * 2]
+        supports = sorted([p for p, _ in top_levels if p < current_price], reverse=True)[:n]
+        resistances = sorted([p for p, _ in top_levels if p > current_price])[:n]
+        return supports, resistances
 
     async def stream_mark_price(self, symbol: str) -> None:
         """

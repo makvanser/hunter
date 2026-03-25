@@ -140,64 +140,56 @@ class PaperTrader:
     def open_positions_count(self) -> int:
         return len(self.positions)
 
-    # ── Kelly Criterion Position Sizing  (V16) ────────────────
-    def _kelly_position_size(self) -> float:
+    # ── Kelly Criterion Position Sizing  (V16/V33) ────────────────
+    def _kelly_position_size(self, confidence: float = 1.0) -> float:
         """
-        Compute position size using half-Kelly Criterion.
-
-        Falls back to fixed TRADE_SIZE_USD when:
-          - KELLY_ENABLED is False
-          - Fewer than KELLY_MIN_TRADES in history
-          - avg_win or avg_loss is zero
+        V33: Kelly Criterion sizing scaled by ML confidence.
+        
+        Args:
+            confidence: ML probability 0.0-1.0. Default 1.0 = full size (passthrough).
         """
         if not KELLY_ENABLED:
-            return min(TRADE_SIZE_USD, self.balance)
+            base_size = min(TRADE_SIZE_USD, self.balance)
+        else:
+            stats = get_trade_stats(self.db_path)
+            if stats["n_trades"] < KELLY_MIN_TRADES:
+                base_size = min(TRADE_SIZE_USD, self.balance)
+            else:
+                wr = stats["win_rate"]
+                avg_win = stats["avg_win"]
+                avg_loss = stats["avg_loss"]
 
-        stats = get_trade_stats(self.db_path)
-        if stats["n_trades"] < KELLY_MIN_TRADES:
-            logger.debug(
-                "Kelly: only %d trades (min %d) → using fixed size",
-                stats["n_trades"],
-                KELLY_MIN_TRADES,
-            )
-            return min(TRADE_SIZE_USD, self.balance)
+                if avg_win <= 0 or avg_loss <= 0:
+                    base_size = min(TRADE_SIZE_USD, self.balance)
+                else:
+                    win_loss_ratio = avg_win / avg_loss
+                    loss_rate = 1.0 - wr
+                    basic_kelly = wr - (loss_rate / win_loss_ratio)
+                    basic_kelly = max(0.01, min(basic_kelly, 1.0))
+                    
+                    actual_position_pct = basic_kelly * KELLY_FRACTION
+                    max_allowed_pct = MAX_RISK_PER_TRADE_PCT / 100.0
+                    final_pct = min(actual_position_pct, max_allowed_pct)
 
-        wr = stats["win_rate"]
-        avg_win = stats["avg_win"]
-        avg_loss = stats["avg_loss"]
+                    base_size = self.balance * final_pct
+                    base_size = max(base_size, 10.0)
 
-        if avg_win <= 0 or avg_loss <= 0:
-            return min(TRADE_SIZE_USD, self.balance)
-            
-        win_loss_ratio = avg_win / avg_loss
-
-        # V25 Modified Kelly: Win Rate - (Loss Rate / Win-Loss Ratio)
-        loss_rate = 1.0 - wr
-        basic_kelly = wr - (loss_rate / win_loss_ratio)
-        basic_kelly = max(0.01, min(basic_kelly, 1.0))  # clamp: never <1% or >100%
+                    logger.info(
+                        "Kelly: wr=%.0f%% W/L=%.2f → kelly=%.3f qtr=%.3f → base=$%.2f",
+                        wr * 100, win_loss_ratio, basic_kelly, actual_position_pct, base_size,
+                    )
         
-        # Actual Position = Basic Kelly * 0.25 (1/4 Kelly conservative model)
-        actual_position_pct = basic_kelly * KELLY_FRACTION
+        # V33: Scale by ML Confidence
+        # 0.5 → 10% of base (minimum), 0.75 → 50%, 1.0 → 100%
+        if 0.0 < confidence < 1.0:
+            ml_mult = max(0.1, (confidence - 0.5) * 2.0)
+            size = base_size * ml_mult
+            logger.info("   🤖 ML conf=%.0f%% → mult=%.2f → $%.2f (base $%.2f)",
+                        confidence * 100, ml_mult, size, base_size)
+        else:
+            size = base_size
         
-        # Hard Cap: Max 10% risk
-        max_allowed_pct = MAX_RISK_PER_TRADE_PCT / 100.0
-        final_pct = min(actual_position_pct, max_allowed_pct)
-
-        size = self.balance * final_pct
-        size = max(size, 10.0)  # minimum $10
-
-        logger.info(
-            "Kelly sizing: wr=%.1f%% avg_win=$%.2f avg_loss=$%.2f → "
-            "basic_kelly=%.3f quarter=%.3f cap=%.1f%% → size=$%.2f",
-            wr * 100,
-            avg_win,
-            avg_loss,
-            basic_kelly,
-            actual_position_pct,
-            MAX_RISK_PER_TRADE_PCT,
-            size,
-        )
-        return round(size, 2)
+        return round(max(size, 5.0), 2)
 
     # ── Trailing SL Update (V15) ──────────────────────────────
     def _update_trailing_sl(self, symbol: str, current_price: float, atr: float) -> None:
@@ -294,6 +286,7 @@ class PaperTrader:
         current_price: float,
         symbol: str,
         atr: float = 0.0,
+        ml_confidence: float = 1.0,
     ) -> Dict:
         """
         Process a signal for a specific symbol.
@@ -340,14 +333,14 @@ class PaperTrader:
 
         # ── OPEN LONG ─────────────────────────────────────────
         if signal == "BUY" and symbol not in self.positions:
-            return self._open_position(symbol, current_price, "BUY", atr, result)
+            return self._open_position(symbol, current_price, "BUY", atr, result, ml_confidence=ml_confidence)
 
         # ── OPEN SHORT (V15) ──────────────────────────────────
         if signal == "SHORT" and symbol not in self.positions:
             if not SHORT_ENABLED:
                 result["action"] = "SHORTS_DISABLED"
                 return result
-            return self._open_position(symbol, current_price, "SELL", atr, result)
+            return self._open_position(symbol, current_price, "SELL", atr, result, ml_confidence=ml_confidence)
 
         # ── DCA / AVERAGING (V19) ─────────────────────────────
         if signal in ("DCA_BUY", "DCA_SHORT") and symbol in self.positions:
@@ -374,6 +367,7 @@ class PaperTrader:
         side: str,
         atr: float,
         result: Dict,
+        ml_confidence: float = 1.0,
     ) -> Dict:
         """Open a LONG (BUY) or SHORT (SELL) position."""
 
@@ -389,8 +383,8 @@ class PaperTrader:
         # V16: Max total exposure cap
         total_exposure = sum(p["size_usd"] for p in self.positions.values())
 
-        # V16: Kelly Criterion or fixed size
-        size_usd = self._kelly_position_size()
+        # V16: Kelly Criterion or fixed size (V33: scaled by ML confidence)
+        size_usd = self._kelly_position_size(confidence=ml_confidence)
         size_usd = min(size_usd, self.balance)
         size_usd = min(size_usd, MAX_EXPOSURE_USD - total_exposure)
 

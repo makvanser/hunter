@@ -58,7 +58,14 @@ class LiveTrader(PaperTrader):
         self.ws_listening_task = None
         self.ws_futures: Dict[str, asyncio.Future] = {}
         
+        # V33: Provider reference for CVD adverse selection monitoring
+        self._provider_ref = None
+        
         logger.info("✅ LiveTrader initialized for %s", "TESTNET" if USE_TESTNET else "MAINNET")
+    
+    def set_provider(self, provider):
+        """V33: Store provider reference for CVD adverse selection monitoring."""
+        self._provider_ref = provider
         
         # Note: balance is automatically fetched asynchronously later during the cycle.
         # self.balance is initialized from INITIAL_BALANCE_USD locally for safety, but we strictly 
@@ -329,8 +336,37 @@ class LiveTrader(PaperTrader):
         filled_qty = 0.0
         total_spent = 0.0
         
+        # V33: Snapshot CVD at order placement for adverse selection detection
+        cvd_at_entry = 0.0
+        if hasattr(self, '_provider_ref') and self._provider_ref:
+            cvd_at_entry = self._provider_ref.get_cvd(symbol)
+        ADVERSE_CVD_THRESHOLD = 50000.0  # $50k USD flow against us = cancel
+        
         while time.time() - start_time < timeout:
             await asyncio.sleep(1)
+            
+            # V33: Adverse Selection Check — monitor CVD while waiting for fills
+            if hasattr(self, '_provider_ref') and self._provider_ref:
+                current_cvd = self._provider_ref.get_cvd(symbol)
+                cvd_change = current_cvd - cvd_at_entry
+                
+                # If we're buying and sellers are dumping hard, cancel
+                if side == "BUY" and cvd_change < -ADVERSE_CVD_THRESHOLD:
+                    logger.warning("🛑 ADVERSE SELECTION: CVD dumped $%.0f while BUY limits pending. Cancelling.", abs(cvd_change))
+                    for oid in order_ids:
+                        await self._ws_request("order.cancel", {"symbol": symbol, "orderId": oid})
+                    if filled_qty > 0:
+                        return total_spent / filled_qty
+                    return -1.0
+                    
+                # If we're selling and buyers are pumping hard, cancel
+                if side == "SELL" and cvd_change > ADVERSE_CVD_THRESHOLD:
+                    logger.warning("🛑 ADVERSE SELECTION: CVD pumped $%.0f while SELL limits pending. Cancelling.", cvd_change)
+                    for oid in order_ids:
+                        await self._ws_request("order.cancel", {"symbol": symbol, "orderId": oid})
+                    if filled_qty > 0:
+                        return total_spent / filled_qty
+                    return -1.0
             
             # Poll all active orders via WS
             active_ids = list(order_ids) # copy
@@ -356,8 +392,6 @@ class LiveTrader(PaperTrader):
         if filled_qty > 0:
             final_avg_price = total_spent / filled_qty
             logger.info("✅ GRID COMPLETE: Executed total %.3f at Avg Price %.4f", filled_qty, final_avg_price)
-            # Override quantity parameter inside the caller requires changing the return signature, 
-            # but since V24 only uses this entry price to calculate SL/TP correctly:
             return final_avg_price
             
         logger.warning("⚠️ Limit grid timeout (%ds) with no fills.", timeout)
@@ -408,7 +442,7 @@ class LiveTrader(PaperTrader):
             
         return None
 
-    async def execute_trade(self, signal: str, current_price: float, symbol: str, atr: float = 0.0, provider=None) -> Dict:
+    async def execute_trade(self, signal: str, current_price: float, symbol: str, atr: float = 0.0, provider=None, ml_confidence: float = 1.0) -> Dict:
         """
         Async orchestration of the PaperTrader cycle logic.
         """
@@ -455,14 +489,14 @@ class LiveTrader(PaperTrader):
 
         # ── OPEN LONG
         if signal == "BUY" and symbol not in self.positions:
-            return await self._open_position(symbol, current_price, "BUY", atr, result, provider)
+            return await self._open_position(symbol, current_price, "BUY", atr, result, provider, ml_confidence=ml_confidence)
 
         # ── OPEN SHORT
         if signal == "SHORT" and symbol not in self.positions:
             if not SHORT_ENABLED:
                 result["action"] = "SHORTS_DISABLED"
                 return result
-            return await self._open_position(symbol, current_price, "SELL", atr, result, provider)
+            return await self._open_position(symbol, current_price, "SELL", atr, result, provider, ml_confidence=ml_confidence)
 
         # ── CLOSE LONG
         if signal == "SELL" and symbol in self.positions:
@@ -476,15 +510,15 @@ class LiveTrader(PaperTrader):
 
         return result
 
-    async def _open_position(self, symbol: str, current_price: float, side: str, atr: float, result: Dict, provider=None) -> Dict:
+    async def _open_position(self, symbol: str, current_price: float, side: str, atr: float, result: Dict, provider=None, ml_confidence: float = 1.0) -> Dict:
         if len(self.positions) >= MAX_OPEN_POSITIONS:
             result["action"] = "MAX_POSITIONS_REACHED"
             return result
 
         total_exposure = sum(p["size_usd"] for p in self.positions.values())
         
-        # V25: Always use Kelly-based sizing (1/4 Kelly conservative model)
-        size_usd = self._kelly_position_size()
+        # V25/V33: Kelly-based sizing scaled by ML confidence
+        size_usd = self._kelly_position_size(confidence=ml_confidence)
         
         # Hard cap: never exceed MAX_RISK_PER_TRADE_PCT of balance
         max_risk_usd = self.balance * (MAX_RISK_PER_TRADE_PCT / 100.0)

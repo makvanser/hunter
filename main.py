@@ -386,7 +386,7 @@ async def run_cycle(
 
     # 9. Execute with latency tracking
     with TelemetryManager.track_latency():
-        result = trader.execute_trade(action, current_price, symbol, atr=atr, provider=provider)
+        result = trader.execute_trade(action, current_price, symbol, atr=atr, provider=provider, ml_confidence=ml_prob)
         if inspect.iscoroutine(result):
             result = await result
             
@@ -510,7 +510,7 @@ async def _statarb_monitor_loop():
 async def run_auto():
     """Auto Mode: scan top pairs + held positions, loop over them asynchronously."""
     logger.info("==============================================")
-    logger.info("  HUNTER V31 — Rust Core HFT Mode Started")
+    logger.info("  HUNTER V33 — Alpha Maximization Mode")
     logger.info("==============================================")
 
     trader = LiveTrader() if LIVE_TRADING else PaperTrader()
@@ -529,6 +529,10 @@ async def run_auto():
         logger.info("💰 Exchange balance synced: $%.2f", bal)
 
     async with BinanceProvider() as provider:
+        # V33: Wire provider reference for CVD adverse selection monitoring
+        if hasattr(trader, 'set_provider'):
+            trader.set_provider(provider)
+        
         fg = social_manager.news_manager.get_fear_and_greed()
         logger.info("Global F&G Index: %s (%s)", fg[0], fg[1])
 

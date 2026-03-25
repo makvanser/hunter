@@ -613,10 +613,93 @@ def compute_support_resistance(
 
 
 # ─────────────────────────────────────────────────────────────
-# Market Regime Filter
+# Market Regime Filter (V34: Volatility-based 3-state detector)
 # ─────────────────────────────────────────────────────────────
+# Regime-specific parameter overrides
+REGIME_PARAMS = {
+    "LOW_VOL": {  # Range/Choppy — tight SL, tight TP, wide RSI bands
+        "atr_sl_mult": 1.0,
+        "atr_tp_mult": 1.5,
+        "rsi_oversold": 25,
+        "rsi_overbought": 75,
+    },
+    "NORMAL": {  # Trending — standard parameters
+        "atr_sl_mult": 1.5,
+        "atr_tp_mult": 2.5,
+        "rsi_oversold": 35,
+        "rsi_overbought": 65,
+    },
+    "HIGH_VOL": {  # Extreme volatility — wide SL to avoid whipsaws
+        "atr_sl_mult": 2.5,
+        "atr_tp_mult": 4.0,
+        "rsi_oversold": 20,
+        "rsi_overbought": 80,
+    },
+}
+
+
+def detect_volatility_regime(closes: list, lookback: int = 96) -> str:
+    """
+    V34: Classify market into LOW_VOL / NORMAL / HIGH_VOL based on
+    rolling realized volatility percentile (no external dependencies).
+    
+    Args:
+        closes: Price history (need at least lookback*2 bars)
+        lookback: Rolling window for volatility calculation (default: 96 = 1 day of 15m bars)
+    
+    Returns:
+        Regime string: "LOW_VOL", "NORMAL", or "HIGH_VOL"
+    """
+    if len(closes) < lookback * 2:
+        return "NORMAL"
+    
+    # Calculate rolling realized volatility (std of log returns)
+    import math
+    returns = []
+    for i in range(1, len(closes)):
+        if closes[i-1] > 0:
+            returns.append(math.log(closes[i] / closes[i-1]))
+    
+    if len(returns) < lookback:
+        return "NORMAL"
+    
+    # Current volatility vs historical distribution
+    current_vol = _std(returns[-lookback:])
+    historical_vols = []
+    for i in range(lookback, len(returns)):
+        historical_vols.append(_std(returns[i-lookback:i]))
+    
+    if not historical_vols:
+        return "NORMAL"
+    
+    # Percentile rank of current vol
+    rank = sum(1 for v in historical_vols if v <= current_vol) / len(historical_vols)
+    
+    if rank < 0.25:
+        return "LOW_VOL"
+    elif rank > 0.75:
+        return "HIGH_VOL"
+    else:
+        return "NORMAL"
+
+
+def _std(values: list) -> float:
+    """Simple standard deviation."""
+    n = len(values)
+    if n < 2:
+        return 0.0
+    mean = sum(values) / n
+    variance = sum((x - mean) ** 2 for x in values) / (n - 1)
+    return variance ** 0.5
+
+
+def get_regime_params(regime: str) -> dict:
+    """Return the dynamic parameter overrides for the current regime."""
+    return REGIME_PARAMS.get(regime, REGIME_PARAMS["NORMAL"])
+
+
 def get_market_regime(adx_value: float) -> str:
-    """Return 'TRENDING' if ADX ≥ threshold, else 'CHOPPY'."""
+    """Return 'TRENDING' if ADX >= threshold, else 'CHOPPY'."""
     return "TRENDING" if adx_value >= ADX_THRESHOLD else "CHOPPY"
 
 

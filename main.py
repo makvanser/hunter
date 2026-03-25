@@ -128,11 +128,17 @@ async def run_cycle(
 
     current_price = closes[-1]
 
-    # 2. Market Regime Filter (ADX)
+    # 2. Market Regime Filter (ADX + V34 Volatility Regime)
     adx = compute_adx(highs, lows, closes, ADX_PERIOD)
     regime = get_market_regime(adx)
+    
+    # V34: Volatility-based regime detection
+    from analysis import detect_volatility_regime, get_regime_params
+    vol_regime = detect_volatility_regime(closes)
+    vol_params = get_regime_params(vol_regime)
+    
     logger.info(
-        "📊 %s @ $%.4f | ADX=%.2f → %s", symbol, current_price, adx, regime
+        "📊 %s @ $%.4f | ADX=%.2f → %s | VolRegime=%s", symbol, current_price, adx, regime, vol_regime
     )
 
     if regime == "CHOPPY":

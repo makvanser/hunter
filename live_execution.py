@@ -554,12 +554,38 @@ class LiveTrader(PaperTrader):
             if DYNAMIC_TP_ENABLED:
                 tp_mult = min(DYNAMIC_TP_MAX_MULT, ATR_TP_MULTIPLIER * 1.5)
             
-            # V29 Phase 2: Dynamic OrderBook Stop-Loss
-            # Check the L2 Cache to see if we can hide our STOP LOSS behind a massive wall
+            # Base ATR SL + adjustment flags
             sl_adjusted = False
             base_sl = entry - atr * ATR_SL_MULTIPLIER if side == "BUY" else entry + atr * ATR_SL_MULTIPLIER
             
-            if provider and getattr(provider, 'depth_cache', None) and symbol in provider.depth_cache:
+            # V34: VPVR Volume Profile SL (Priority 1 — real traded volume)
+            vpvr_adjusted = False
+            if provider and hasattr(provider, 'get_vpvr_support_resistance'):
+                vpvr_supports, vpvr_resistances = provider.get_vpvr_support_resistance(symbol, entry)
+                
+                if side == "BUY" and vpvr_supports:
+                    # Place SL just below the nearest VPVR support node
+                    nearest_vpvr = vpvr_supports[0]  # Highest volume support below entry
+                    if base_sl < nearest_vpvr < entry:
+                        info = await self._get_symbol_info(symbol)
+                        tick = info.get('tickSize', 0.01)
+                        stop_loss = nearest_vpvr - tick
+                        vpvr_adjusted = True
+                        sl_adjusted = True
+                        logger.info("   📊 VPVR SL: BUY Stop behind Volume Node at %.4f (base SL was %.4f)", nearest_vpvr, base_sl)
+                
+                elif side == "SELL" and vpvr_resistances:
+                    nearest_vpvr = vpvr_resistances[0]  # Lowest volume resistance above entry
+                    if entry < nearest_vpvr < base_sl:
+                        info = await self._get_symbol_info(symbol)
+                        tick = info.get('tickSize', 0.01)
+                        stop_loss = nearest_vpvr + tick
+                        vpvr_adjusted = True
+                        sl_adjusted = True
+                        logger.info("   📊 VPVR SL: SHORT Stop behind Volume Node at %.4f (base SL was %.4f)", nearest_vpvr, base_sl)
+
+            # V29 Phase 2: L2 OrderBook SL (Priority 2 — fallback if no VPVR)
+            if not vpvr_adjusted and provider and getattr(provider, 'depth_cache', None) and symbol in provider.depth_cache:
                 depth = provider.depth_cache[symbol]
                 
                 if side == "BUY":

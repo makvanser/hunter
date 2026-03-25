@@ -392,7 +392,7 @@ class PaperTrader:
             result["action"] = "INSUFFICIENT_BALANCE"
             return result
 
-        # ATR-based SL/TP
+        # V34: VPVR-based SL/TP (fallback to ATR)
         stop_loss   = None
         take_profit = None
         if atr > 0:

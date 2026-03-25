@@ -93,6 +93,18 @@ def init_db(db_path: str = DB_PATH) -> None:
         )
     """)
 
+    # V34: Funding PnL Tracker — separate funding payments from trading PnL
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS funding_payments (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp   TEXT    NOT NULL,
+            symbol      TEXT    NOT NULL,
+            funding_rate REAL   NOT NULL,
+            position_size_usd REAL NOT NULL,
+            funding_pnl REAL   NOT NULL
+        )
+    """)
+
     # Seed defaults (ignore if rows already exist)
     c.execute(
         "INSERT OR IGNORE INTO state (key, value) VALUES (?, ?)",
@@ -105,6 +117,28 @@ def init_db(db_path: str = DB_PATH) -> None:
 
     conn.commit()
     conn.close()
+
+
+def log_funding_payment(
+    symbol: str,
+    funding_rate: float,
+    position_size_usd: float,
+    funding_pnl: float,
+    db_path: str = DB_PATH,
+) -> int:
+    """V34: Log a funding rate settlement to the funding_payments table."""
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+    c.execute(
+        "INSERT INTO funding_payments (timestamp, symbol, funding_rate, position_size_usd, funding_pnl) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (now, symbol, funding_rate, position_size_usd, funding_pnl),
+    )
+    row_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return row_id
 
 
 # ─────────────────────────────────────────────────────────────

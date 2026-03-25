@@ -68,13 +68,14 @@ class BinanceProvider:
     async def fetch_ohlcv(
         self, symbol: str, interval: str = TIMEFRAME, limit: int = KLINE_LIMIT
     ) -> Tuple[List[float], List[float], List[float], List[float]]:
-        """Fetch OHLCV candles."""
+        """Fetch OHLCV candles. Returns empty lists on failure (graceful degradation)."""
         data = await self._api_get(
             "/fapi/v1/klines",
             {"symbol": symbol, "interval": interval, "limit": str(limit)},
         )
         if not data:
-            raise ValueError(f"Failed to fetch OHLCV for {symbol}")
+            logger.warning("⚠️ No OHLCV data for %s — symbol may be delisted or unavailable.", symbol)
+            return [], [], [], []
 
         highs = [float(k[2]) for k in data]
         lows = [float(k[3]) for k in data]

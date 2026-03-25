@@ -427,6 +427,8 @@ async def run_manual(symbol: str):
 async def run_pair_wss(symbol: str, provider: BinanceProvider, trader, ml_filter: MLFilter = None, macro_manager: MacroManager = None, strategy_router=None):
     """Handles persistent WSS stream for a specific pair."""
     logger.info("📡 Starting Zero-Latency WSS listener for %s", symbol)
+    consecutive_failures = 0
+    MAX_FAILURES = 5
     while True:
         # Track system metrics via Prometheus (V25)
         TelemetryManager.set_balance(trader.balance)
@@ -434,6 +436,18 @@ async def run_pair_wss(symbol: str, provider: BinanceProvider, trader, ml_filter
         try:
             # Prime data via REST
             data = await provider.fetch_all_market_data(symbol, MULTI_TF_INTERVALS)
+            
+            # V31: Skip symbols that return no data (delisted/unavailable)
+            if not data.get('closes'):
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_FAILURES:
+                    logger.warning("⛔ Dropping %s after %d failures — symbol unavailable.", symbol, MAX_FAILURES)
+                    return
+                logger.warning("⚠️ No data for %s (attempt %d/%d). Retrying in 10s...", symbol, consecutive_failures, MAX_FAILURES)
+                await asyncio.sleep(10)
+                continue
+            
+            consecutive_failures = 0  # Reset on success
             
             async for kline in provider.stream_klines(symbol, TIMEFRAME):
                 if kline.get('x'): # Candle closed
@@ -459,7 +473,11 @@ async def run_pair_wss(symbol: str, provider: BinanceProvider, trader, ml_filter
             logger.info("🛑 WSS Loop cancelled for %s", symbol)
             break
         except Exception as e:
-            logger.error("❌ WSS Crash on %s: %s. Restarting...", symbol, e)
+            consecutive_failures += 1
+            if consecutive_failures >= MAX_FAILURES:
+                logger.error("⛔ Dropping %s after %d consecutive crashes: %s", symbol, MAX_FAILURES, e)
+                return
+            logger.error("❌ WSS Crash on %s: %s. Restarting in 5s... (%d/%d)", symbol, e, consecutive_failures, MAX_FAILURES)
             await asyncio.sleep(5)
 
 async def _statarb_monitor_loop():

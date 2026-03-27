@@ -278,9 +278,11 @@ class LiveTrader(PaperTrader):
         return True
 
     async def _cancel_all_sl_orders(self, symbol: str) -> None:
-        """Cancel all open STOP_MARKET orders for a symbol before placing a new one."""
-        res = await self._ws_request("openOrders.status", {"symbol": symbol})
-        if isinstance(res, list):
+        """Cancel all open orders for a symbol on the exchange (used for clearing SLs)."""
+        # Using order.cancelAll is safer than querying openOrders.status across Different API versions
+        res = await self._ws_request("order.cancelAll", {"symbol": symbol})
+        if "error" in res:
+            logger.warning("⚠️ Could not cancel open orders for %s: %s", symbol, res['error'])
             for order in res:
                 if order.get('type') == 'STOP_MARKET' and order.get('status') == 'NEW':
                     await self._ws_request("order.cancel", {
@@ -675,7 +677,13 @@ class LiveTrader(PaperTrader):
         
         # API execution to close
         close_side = "SELL" if pos["side"] == "BUY" else "BUY"
-        avg_price = await self.open_market_order(symbol, close_side, pos["quantity"])
+        qty = pos.get("quantity", 0)
+        if qty <= 0:
+            logger.error("❌ Cannot close position %s: Quantity is 0 or missing!", symbol)
+            result["action"], result["blocked"] = "ZERO_QUANTITY_ERROR", True
+            return result
+            
+        avg_price = await self.open_market_order(symbol, close_side, qty)
         if avg_price < 0:
             result["action"], result["blocked"] = "API_CLOSING_ERROR", True
             return result
@@ -686,22 +694,14 @@ class LiveTrader(PaperTrader):
         pnl = self.simulate_pnl(entry=pos["entry"], exit_price=exit_price, size_usd=pos["size_usd"], side=pos["side"])
         self.balance += pos["size_usd"] + pnl
 
+        # V32: Slippage Analytics
+        slippage = (current_price - exit_price) / current_price * 100.0 if close_side == "SELL" else (exit_price - current_price) / current_price * 100.0
+
         trade_id = log_trade(
             side=close_side, price=exit_price, size_usd=pos["size_usd"],
             pnl=pnl, db_path=self.db_path, symbol=symbol,
             slippage=slippage
         )
-
-        del self.positions[symbol]
-        delete_position(symbol, self.db_path)
-
-        result["action"] = "CLOSED_LONG" if close_side == "SELL" else "CLOSED_SHORT"
-        result["pnl"] = pnl
-        result["trade_id"] = trade_id
-        result["reason"] = reason
-
-        # V32: Slippage Analytics
-        slippage = (current_price - exit_price) / current_price * 100.0 if close_side == "SELL" else (exit_price - current_price) / current_price * 100.0
         result["slippage_pct"] = slippage
 
         logger.info("💰 API: %s %s @ %.4f (Slippage: %.3f%%) | PnL=$%.4f | reason=%s | balance=$%.2f",

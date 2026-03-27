@@ -75,14 +75,21 @@ def init_db(db_path: str = DB_PATH) -> None:
             take_profit REAL,
             trail_high  REAL,
             trail_low   REAL,
-            opened_at   TEXT    NOT NULL,
-            dca_count   INTEGER DEFAULT 0
+            opened_at   TEXT,
+            dca_count   INTEGER DEFAULT 0,
+            quantity    REAL    DEFAULT 0
         )
     """)
 
     # V19 migration: add dca_count column for older DBs
     try:
         c.execute("ALTER TABLE positions ADD COLUMN dca_count INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
+    # V34 migration: add quantity column for older DBs
+    try:
+        c.execute("ALTER TABLE positions ADD COLUMN quantity REAL DEFAULT 0")
     except sqlite3.OperationalError:
         pass
 
@@ -206,8 +213,8 @@ def save_position(symbol: str, pos: Dict, db_path: str = DB_PATH) -> None:
     c.execute(
         """INSERT OR REPLACE INTO positions
            (symbol, side, entry, size_usd, stop_loss, take_profit,
-            trail_high, trail_low, opened_at, dca_count)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            trail_high, trail_low, opened_at, dca_count, quantity)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             symbol,
             pos["side"],
@@ -219,6 +226,7 @@ def save_position(symbol: str, pos: Dict, db_path: str = DB_PATH) -> None:
             pos.get("trail_low"),
             pos.get("opened_at", datetime.now(timezone.utc).isoformat()),
             pos.get("dca_count", 0),
+            pos.get("quantity", 0),
         ),
     )
     conn.commit()
@@ -231,7 +239,7 @@ def load_positions(db_path: str = DB_PATH) -> Dict[str, Dict]:
     c = conn.cursor()
     c.execute(
         "SELECT symbol, side, entry, size_usd, stop_loss, take_profit, "
-        "trail_high, trail_low, opened_at, dca_count FROM positions"
+        "trail_high, trail_low, opened_at, dca_count, quantity FROM positions"
     )
     rows = c.fetchall()
     conn.close()
@@ -248,6 +256,7 @@ def load_positions(db_path: str = DB_PATH) -> Dict[str, Dict]:
             "trail_low": r[7],
             "opened_at": r[8],
             "dca_count": r[9],
+            "quantity": r[10],
         }
     return positions
 

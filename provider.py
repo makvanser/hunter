@@ -353,9 +353,11 @@ class BinanceProvider:
         """
         url = f"wss://fstream.binance.com/ws/{symbol.lower()}@markPrice@1s"
         
+        _mark_fail = 0
         while True:
             try:
                 async with self.session.ws_connect(url, timeout=30) as ws:
+                    _mark_fail = 0
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             data = json.loads(msg.data)
@@ -365,8 +367,14 @@ class BinanceProvider:
                             break
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                await asyncio.sleep(5)
+            except Exception as e:
+                _mark_fail += 1
+                backoff = min(5 * _mark_fail, 60)
+                if _mark_fail >= 5:
+                    logger.error("🚫 MARK WSS %s: %d failures. Giving up.", symbol, _mark_fail)
+                    return
+                logger.error("❌ MARK WSS Error on %s: %s. Retry %d/5 in %ds...", symbol, e, _mark_fail, backoff)
+                await asyncio.sleep(backoff)
 
     async def fetch_open_interest_delta(self, symbol: str) -> float:
         """Fetch % % change in Open Interest over the last hour."""

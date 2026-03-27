@@ -545,6 +545,14 @@ async def run_auto():
         try:
             top_pairs = await provider.scan_top_pairs()
             
+            # V35: Filter top_pairs against actual exchange info to avoid 404s on Testnet
+            available_symbols = await provider.get_exchange_info()
+            if available_symbols:
+                valid_top = [s for s in top_pairs if s in available_symbols]
+                if len(valid_top) < len(top_pairs):
+                    logger.info("🛡️ Filtered %d symbols not available on this exchange (Testnet check)", len(top_pairs) - len(valid_top))
+                top_pairs = valid_top
+            
             # WSS Execution Warmup (V28 Phase 3)
             if LIVE_TRADING and hasattr(trader, 'connect_ws'):
                 await trader.connect_ws()

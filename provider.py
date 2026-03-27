@@ -43,6 +43,13 @@ class BinanceProvider:
         self.depth_cache: Dict[str, Dict] = {}
         self.cvd_cache: Dict[str, float] = {}  # V28 Phase 2 (Cumulative Volume Delta)
         self.rust_orderbooks: Dict[str, OrderBook] = {}
+        
+        # V35: Dynamic WSS base based on environment
+        if USE_TESTNET:
+            self.wss_base = "wss://stream.binancefuture.com"
+        else:
+            self.wss_base = "wss://fstream.binance.com"
+        logger.info("📡 BinanceProvider initialized (Testnet: %s, WSS: %s)", USE_TESTNET, self.wss_base)
         self.last_price_cache: Dict[str, float] = {}  # V32: Tick-level price tracking
         self.volume_profile: Dict[str, Dict[float, float]] = {}  # V33: VPVR histogram
 
@@ -67,7 +74,7 @@ class BinanceProvider:
                     return None
                 return await response.json()
         except Exception as e:
-            logger.error("❌ Exception during API GET on %s: %s", endpoint, e)
+            logger.error("❌ Exception during API GET on %s: %s", endpoint, repr(e))
             return None
 
     async def fetch_ohlcv(
@@ -130,7 +137,7 @@ class BinanceProvider:
         Yields the 'k' (kline) dictionary from the stream.
         Handles automatic reconnection.
         """
-        url = f"wss://fstream.binance.com/ws/{symbol.lower()}@kline_{interval}"
+        url = f"{self.wss_base}/ws/{symbol.lower()}@kline_{interval}"
         logger.info("🔌 Initializing WSS connection to %s", url)
         
         while True:
@@ -164,7 +171,7 @@ class BinanceProvider:
         V23 Phase 2: Connects to Binance bookTicker WSS.
         Runs infinitely in background updating the BBO cache.
         """
-        url = f"wss://fstream.binance.com/ws/{symbol.lower()}@bookTicker"
+        url = f"{self.wss_base}/ws/{symbol.lower()}@bookTicker"
         logger.info("🔌 Initializing BBO WSS connection to %s", url)
         
         _bbo_fail = 0
@@ -207,7 +214,7 @@ class BinanceProvider:
         V24 Phase 3: Connects to Binance deep orderbook WSS (@depth20@100ms).
         Parses top 20 levels of bids and asks to calculate true liquidity walls.
         """
-        url = f"wss://fstream.binance.com/ws/{symbol.lower()}@depth20@100ms"
+        url = f"{self.wss_base}/ws/{symbol.lower()}@depth20@100ms"
         logger.info("🔌 Initializing Depth20 WSS connection to %s", url)
         
         _depth_fail = 0
@@ -275,7 +282,7 @@ class BinanceProvider:
         V28 Phase 2: Connects to Binance @aggTrade WSS.
         Calculates real-time Cumulative Volume Delta (CVD) for the current candle.
         """
-        url = f"wss://fstream.binance.com/ws/{symbol.lower()}@aggTrade"
+        url = f"{self.wss_base}/ws/{symbol.lower()}@aggTrade"
         logger.info("🔌 Initializing CVD WSS connection to %s", url)
         self.cvd_cache[symbol] = 0.0
         
@@ -354,7 +361,7 @@ class BinanceProvider:
         V32: Connects to Binance @markPrice WSS (updates every 1s).
         Provides tick-level price data for real-time SL monitoring.
         """
-        url = f"wss://fstream.binance.com/ws/{symbol.lower()}@markPrice@1s"
+        url = f"{self.wss_base}/ws/{symbol.lower()}@markPrice@1s"
         
         _mark_fail = 0
         while True:
@@ -424,6 +431,19 @@ class BinanceProvider:
             except (ValueError, TypeError):
                 pass
         return net_usd
+
+    async def get_exchange_info(self) -> List[str]:
+        """Fetch all currently trading USDT futures symbols."""
+        data = await self._api_get("/fapi/v1/exchangeInfo")
+        if not data or "symbols" not in data:
+            return []
+        
+        return [
+            s["symbol"] for s in data["symbols"]
+            if s["status"] == "TRADING"
+            and s["contractType"] == "PERPETUAL"
+            and s["quoteAsset"] == "USDT"
+        ]
 
     async def scan_top_pairs(self, count: int = TOP_PAIRS_COUNT) -> List[str]:
         """Fetch top USDT-margined futures pairs by 24h quote volume."""

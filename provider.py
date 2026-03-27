@@ -134,6 +134,7 @@ class BinanceProvider:
             try:
                 async with self.session.ws_connect(url, timeout=30) as ws:
                     logger.info("🟢 WSS Connected to %s", url)
+                    _fail_count = 0  # Reset on successful connect
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             data = json.loads(msg.data)
@@ -146,8 +147,14 @@ class BinanceProvider:
                 logger.info("🛑 WSS stream cancelled.")
                 raise
             except Exception as e:
-                logger.error("❌ WSS Error on %s: %s. Reconnecting in 5s...", symbol, e)
-                await asyncio.sleep(5)
+                _fail_count = getattr(self, f'_wss_fail_{symbol}', 0) + 1
+                setattr(self, f'_wss_fail_{symbol}', _fail_count)
+                backoff = min(5 * _fail_count, 60)
+                if _fail_count >= 5:
+                    logger.error("🚫 WSS %s: %d consecutive failures. Giving up.", symbol, _fail_count)
+                    return
+                logger.error("❌ WSS Error on %s: %s. Retry %d/5 in %ds...", symbol, e, _fail_count, backoff)
+                await asyncio.sleep(backoff)
 
     async def stream_bbo(self, symbol: str) -> None:
         """
@@ -157,10 +164,12 @@ class BinanceProvider:
         url = f"wss://fstream.binance.com/ws/{symbol.lower()}@bookTicker"
         logger.info("🔌 Initializing BBO WSS connection to %s", url)
         
+        _bbo_fail = 0
         while True:
             try:
                 async with self.session.ws_connect(url, timeout=30) as ws:
                     logger.info("🟢 BBO WSS Connected for %s", symbol)
+                    _bbo_fail = 0
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             data = json.loads(msg.data)
@@ -178,8 +187,13 @@ class BinanceProvider:
                 logger.info("🛑 BBO WSS stream cancelled for %s.", symbol)
                 raise
             except Exception as e:
-                logger.error("❌ BBO WSS Error on %s: %s. Reconnecting in 5s...", symbol, e)
-                await asyncio.sleep(5)
+                _bbo_fail += 1
+                backoff = min(5 * _bbo_fail, 60)
+                if _bbo_fail >= 5:
+                    logger.error("🚫 BBO WSS %s: %d failures. Giving up.", symbol, _bbo_fail)
+                    return
+                logger.error("❌ BBO WSS Error on %s: %s. Retry %d/5 in %ds...", symbol, e, _bbo_fail, backoff)
+                await asyncio.sleep(backoff)
 
     def get_bbo(self, symbol: str) -> Optional[Dict[str, float]]:
         """Return cached BBO data for symbol."""
@@ -193,19 +207,19 @@ class BinanceProvider:
         url = f"wss://fstream.binance.com/ws/{symbol.lower()}@depth20@100ms"
         logger.info("🔌 Initializing Depth20 WSS connection to %s", url)
         
+        _depth_fail = 0
         while True:
             try:
                 async with self.session.ws_connect(url, timeout=30) as ws:
                     logger.info("🟢 DEPTH WSS Connected for %s", symbol)
+                    _depth_fail = 0
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             data = json.loads(msg.data)
                             if 'b' in data and 'a' in data:
-                                # Data format: 'b': [[price, qty], [price, qty]...], 'a': [...]
                                 bids_data = [[float(p), float(q)] for p, q in data['b']]
                                 asks_data = [[float(p), float(q)] for p, q in data['a']]
                                 
-                                # Use Rust engine for OBI
                                 if symbol not in self.rust_orderbooks:
                                     self.rust_orderbooks[symbol] = OrderBook()
                                 
@@ -223,8 +237,13 @@ class BinanceProvider:
                 logger.info("🛑 DEPTH WSS stream cancelled for %s.", symbol)
                 raise
             except Exception as e:
-                logger.error("❌ DEPTH WSS Error on %s: %s. Reconnecting in 5s...", symbol, e)
-                await asyncio.sleep(5)
+                _depth_fail += 1
+                backoff = min(5 * _depth_fail, 60)
+                if _depth_fail >= 5:
+                    logger.error("🚫 DEPTH WSS %s: %d failures. Giving up.", symbol, _depth_fail)
+                    return
+                logger.error("❌ DEPTH WSS Error on %s: %s. Retry %d/5 in %ds...", symbol, e, _depth_fail, backoff)
+                await asyncio.sleep(backoff)
 
     def get_deep_obi(self, symbol: str) -> float:
         """
@@ -257,10 +276,12 @@ class BinanceProvider:
         logger.info("🔌 Initializing CVD WSS connection to %s", url)
         self.cvd_cache[symbol] = 0.0
         
+        _cvd_fail = 0
         while True:
             try:
                 async with self.session.ws_connect(url, timeout=30) as ws:
                     logger.info("🟢 CVD WSS Connected for %s", symbol)
+                    _cvd_fail = 0
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             data = json.loads(msg.data)
@@ -286,8 +307,13 @@ class BinanceProvider:
                 logger.info("🛑 CVD WSS stream cancelled for %s.", symbol)
                 raise
             except Exception as e:
-                logger.error("❌ CVD WSS Error on %s: %s. Reconnecting in 5s...", symbol, e)
-                await asyncio.sleep(5)
+                _cvd_fail += 1
+                backoff = min(5 * _cvd_fail, 60)
+                if _cvd_fail >= 5:
+                    logger.error("🚫 CVD WSS %s: %d failures. Giving up.", symbol, _cvd_fail)
+                    return
+                logger.error("❌ CVD WSS Error on %s: %s. Retry %d/5 in %ds...", symbol, e, _cvd_fail, backoff)
+                await asyncio.sleep(backoff)
 
     def get_cvd(self, symbol: str) -> float:
         """Return the current Cumulative Volume Delta (USD) for the symbol."""

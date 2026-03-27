@@ -159,28 +159,34 @@ class LiveTrader(PaperTrader):
         finally:
             self.ws_futures.pop(req_id, None)
 
-    async def _api_post(self, endpoint: str, payload: Dict[str, Any]) -> Dict:
-        """Fetch USDT balance from Binance Futures."""
+    async def sync_balance(self) -> float:
+        """Fetch USDT balance from Binance Futures and update internal state."""
         payload = {'timestamp': int(time.time() * 1000)}
         payload['signature'] = self._sign_payload(payload)
         url = f"{BASE_URL}/fapi/v2/balance"
         
         headers = {"X-MBX-APIKEY": API_KEY}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, params=payload) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    for asset in data:
-                        if asset['asset'] == 'USDT':
-                            real_bal = float(asset['balance'])
-                            self.balance = real_bal
-                            # V22: Set initial balance from actual exchange 
-                            # balance on first sync to prevent false drawdown
-                            if not self._initial_balance_synced:
-                                self._initial_balance_synced = True
-                                self._initial_balance = real_bal
-                                logger.info("💰 Initial balance synced from exchange: $%.2f", real_bal)
-                            return real_bal
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, params=payload, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        for asset in data:
+                            if asset['asset'] == 'USDT':
+                                real_bal = float(asset['balance'])
+                                self.balance = real_bal
+                                # V22: Set initial balance from actual exchange 
+                                # balance on first sync to prevent false drawdown
+                                if not self._initial_balance_synced:
+                                    self._initial_balance_synced = True
+                                    self._initial_balance = real_bal
+                                    logger.info("💰 Initial balance synced from exchange: $%.2f", real_bal)
+                                return real_bal
+                    else:
+                        txt = await response.text()
+                        logger.error("❌ Failed to sync balance: %d %s", response.status, txt)
+        except Exception as e:
+            logger.error("❌ Exception during sync_balance: %s", e)
         return self.balance
 
     async def _get_symbol_info(self, symbol: str) -> Dict[str, float]:

@@ -61,10 +61,13 @@ class BinanceProvider:
         url = f"{BASE_URL}{endpoint}"
         try:
             async with self.session.get(url, params=params, timeout=10) as response:
-                response.raise_for_status()
+                if response.status >= 400:
+                    txt = await response.text()
+                    logger.error("❌ Binance API Error on %s: %d %s", endpoint, response.status, txt)
+                    return None
                 return await response.json()
         except Exception as e:
-            logger.error("❌ Binance API Error on %s: %s", endpoint, e)
+            logger.error("❌ Exception during API GET on %s: %s", endpoint, e)
             return None
 
     async def fetch_ohlcv(

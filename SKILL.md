@@ -79,6 +79,19 @@ nohup python3 main.py > bot_live.log 2>&1 &
 tail -f bot_live.log
 ```
 
+## Agent Execution Interface (LLM Orders)
+
+To place trades autonomously, agents **MUST** use the provided CLI tool:
+
+```bash
+python3 execute_tool.py <SYMBOL> <BUY|SHORT|SELL|COVER> <USD_SIZE>
+```
+
+*Example:* `python3 execute_tool.py BTCUSDT BUY 15.0`
+
+- The tool handles retrieving the Best Bid/Ask, managing `LiveTrader` state, and enforcing Maker limits.
+- Agents DO NOT need to write custom Python scripts to place trades.
+
 ## Architectural Rules
 
 - **MAKER ONLY**: All execution uses `LIMIT` orders (`GTX` / Post Only)

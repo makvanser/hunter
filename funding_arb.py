@@ -142,7 +142,120 @@ class FundingArbEngine:
     def should_close_arb(self, symbol: str, current_funding_rate: float) -> bool:
         """Check if funding has normalized enough to close the arb position."""
         return abs(current_funding_rate) < MIN_FUNDING_RATE * 0.5
-    
+
+    # ─────────────────────────────────────────────────────────
+    # V36: Funding Regime Detection (from Vibe-Trading)
+    # ─────────────────────────────────────────────────────────
+
+    def detect_funding_regime(
+        self,
+        funding_history: List[float],
+    ) -> Dict[str, Any]:
+        """
+        V36: Classify the current funding regime based on rolling statistics.
+
+        Regimes:
+          - CONTANGO: funding persistently positive → longs pay shorts → bearish bias
+          - BACKWARDATION: funding persistently negative → shorts pay longs → bullish bias
+          - NEUTRAL: funding oscillating around zero
+          - EXTREME_CONTANGO: funding > 2σ → strong bearish, likely overleveraged longs
+          - EXTREME_BACKW: funding < -2σ → strong bullish, shorts squeezable
+
+        Args:
+            funding_history: List of recent 8h funding rates (at least 21 values).
+
+        Returns:
+            Dict with regime, mean, std, zscore, bias.
+        """
+        import numpy as np
+
+        if len(funding_history) < 7:
+            return {"regime": "UNKNOWN", "bias": 0.0, "mean": 0.0, "std": 0.0, "zscore": 0.0}
+
+        arr = np.array(funding_history, dtype=np.float64)
+        mean = float(arr.mean())
+        std = float(arr.std())
+        current = arr[-1]
+        zscore = (current - mean) / (std + 1e-10)
+
+        if zscore > 2.0:
+            regime = "EXTREME_CONTANGO"
+            bias = -0.8  # Strong bearish bias
+        elif zscore < -2.0:
+            regime = "EXTREME_BACKW"
+            bias = 0.8   # Strong bullish bias
+        elif mean > MIN_FUNDING_RATE * 0.3:
+            regime = "CONTANGO"
+            bias = -0.3
+        elif mean < -MIN_FUNDING_RATE * 0.3:
+            regime = "BACKWARDATION"
+            bias = 0.3
+        else:
+            regime = "NEUTRAL"
+            bias = 0.0
+
+        return {
+            "regime": regime,
+            "bias": round(bias, 4),
+            "mean": round(mean, 6),
+            "std": round(std, 6),
+            "zscore": round(zscore, 4),
+            "current": round(current, 6),
+        }
+
+    def oi_funding_signal(
+        self,
+        funding_rate: float,
+        oi_change_pct: float,
+        price_change_pct: float,
+    ) -> Dict[str, Any]:
+        """
+        V36: OI × Funding matrix signal.
+
+        Detects divergence between OI/funding direction and price action:
+        - OI rising + funding rising + price flat/dropping → overleveraged longs, SHORT signal
+        - OI rising + funding dropping + price flat/rising → overleveraged shorts, LONG signal
+        - OI dropping + funding normalizing → wash-out complete, trend continuation
+
+        Args:
+            funding_rate: Current 8h funding rate.
+            oi_change_pct: OI change % over last period.
+            price_change_pct: Price change % over same period.
+
+        Returns:
+            Dict with signal(-1/0/1), description, and confidence.
+        """
+        signal = 0
+        desc = "neutral"
+        conf = 0.0
+
+        # Case 1: OI surging + funding rising + price stalling → bearish divergence
+        if oi_change_pct > 3.0 and funding_rate > MIN_FUNDING_RATE and price_change_pct < 1.0:
+            signal = -1
+            desc = "OI+Funding diverge: overleveraged longs"
+            conf = min(0.8, 0.4 + abs(funding_rate) * 50)
+
+        # Case 2: OI surging + funding dropping + price stalling → bullish divergence
+        elif oi_change_pct > 3.0 and funding_rate < -MIN_FUNDING_RATE and price_change_pct > -1.0:
+            signal = 1
+            desc = "OI+Funding diverge: overleveraged shorts"
+            conf = min(0.8, 0.4 + abs(funding_rate) * 50)
+
+        # Case 3: OI flush (dropping) + funding normalizing → end of liquidation
+        elif oi_change_pct < -5.0 and abs(funding_rate) < MIN_FUNDING_RATE * 0.5:
+            signal = 0
+            desc = "OI flush: liquidation complete, wait for setup"
+            conf = 0.3
+
+        return {
+            "signal": signal,
+            "description": desc,
+            "confidence": round(conf, 4),
+            "oi_change_pct": round(oi_change_pct, 2),
+            "funding_rate": round(funding_rate, 6),
+            "price_change_pct": round(price_change_pct, 2),
+        }
+
     def get_stats(self) -> Dict[str, Any]:
         """Return cumulative funding arb statistics."""
         return {

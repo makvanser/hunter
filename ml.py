@@ -172,6 +172,41 @@ class MLFilter:
             cvd_slope   = getattr(market_state, 'cvd_slope', 0.0) / 1000.0 # Normalize: $1k/sec = 1.0
             spread_real = getattr(market_state, 'bid_ask_spread', 0.0)
 
+            # ── V36: Vibe-Trading Features ──
+            # Rolling returns (5-bar ≈ ~1h and 20-bar ≈ ~5h on 15m)
+            ret_5 = 0.0
+            if len(c) >= 6:
+                ret_5 = (c[-1] - c[-6]) / c[-6] * 100.0
+            ret_20 = 0.0
+            if len(c) >= 21:
+                ret_20 = (c[-1] - c[-21]) / c[-21] * 100.0
+
+            # 20-bar volatility
+            vol_20 = 0.0
+            if len(c) >= 21:
+                _rets = [(c[i] - c[i-1]) / c[i-1] for i in range(-20, 0)]
+                vol_20 = float(np.std(_rets) * 100.0)
+
+            # MA ratio: price vs 50-bar SMA
+            ma_ratio = 0.0
+            if len(c) >= 50:
+                sma_50 = sum(c[-50:]) / 50.0
+                if sma_50 > 0:
+                    ma_ratio = (c[-1] / sma_50 - 1.0) * 100.0
+
+            # Skewness of last 20 returns
+            skew_20 = 0.0
+            if len(c) >= 21:
+                _rets = np.array([(c[i] - c[i-1]) / c[i-1] for i in range(-20, 0)])
+                _mean_r = _rets.mean()
+                _std_r = _rets.std()
+                if _std_r > 1e-10:
+                    skew_20 = float(((_rets - _mean_r) ** 3).mean() / (_std_r ** 3))
+
+            # VPIN and pattern signal from MarketState
+            vpin = getattr(market_state, 'vpin', 0.0)
+            pattern_sig = getattr(market_state, 'pattern_signal', 0.0)
+
             features = np.array([
                 obi_current,
                 obi_delta * 5.0,     # Amplify acceleration signal
@@ -190,6 +225,14 @@ class MLFilter:
                 day_sin,
                 day_cos,
                 btc_rsi_div,
+                # V36 features (7 new)
+                ret_5 / 10.0,       # ~1h return normalized
+                ret_20 / 20.0,      # ~5h return normalized
+                vol_20,             # 20-bar volatility %
+                ma_ratio / 10.0,    # price vs SMA50 normalized
+                skew_20,            # return skewness [-3, 3]
+                vpin,               # VPIN [0, 1]
+                pattern_sig,        # pattern composite [-1, 1]
             ], dtype=np.float64)
 
             features = np.nan_to_num(features, nan=0.0, posinf=1.0, neginf=-1.0)

@@ -1,20 +1,25 @@
 """
-Hunter V34 — Walk-Forward Optimizer
+Hunter V36 — Walk-Forward Optimizer
 =====================================
 Offline parameter optimization engine that periodically retrains
 strategy parameters on historical data using out-of-sample validation.
 
+V36: Statistical validation guard — parameters are only saved if
+     Monte Carlo p-value ≤ 0.05 (better than random trade ordering)
+     and Bootstrap P(Sharpe > 0) ≥ 60%.
+
 Usage:
     python optimizer.py                    # Run optimization with defaults (30d window)
     python optimizer.py --window 14        # 14-day training window
-    python optimizer.py --dry-run          # Print optimal params without saving
+    python optimizer.py --dry-run          # Print results without saving
 
 Algorithm:
     1. Fetch last N days of OHLCV data for top traded pairs
     2. Split into 70% train / 30% test (walk-forward)
     3. Grid search over ATR_SL_MULT, ATR_TP_MULT, RSI thresholds
     4. Select parameter set with highest Sharpe on OOS (test) data
-    5. Save optimal parameters to state.db for live bot to consume
+    5. Run statistical validation (Monte Carlo + Bootstrap + WFA)
+    6. Save optimal parameters ONLY if statistically significant
 """
 
 import argparse
@@ -34,6 +39,7 @@ from analysis import (
     compute_rsi, compute_atr, compute_bollinger,
     compute_macd, compute_adx, get_market_regime,
 )
+from validation import validate_strategy
 
 logger = logging.getLogger("hunter.optimizer")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(name)-24s | %(levelname)-7s | %(message)s")
@@ -65,7 +71,43 @@ def _generate_combos(grid: Dict[str, List]) -> List[Dict[str, float]]:
 
 
 # ─────────────────────────────────────────────────────────────
-# Simple Backtester
+# V36: Almgren-Chriss Sqrt-Impact Slippage Model
+# ─────────────────────────────────────────────────────────────
+def sqrt_impact_slippage(
+    price: float,
+    direction: int,
+    trade_size_usd: float,
+    adv_usd: float,
+    volatility: float,
+    eta: float = 0.5,
+) -> float:
+    """
+    Almgren-Chriss square-root market impact model.
+    impact = η × σ × √(V/ADV)
+
+    Falls back to fixed slippage if ADV is unavailable.
+
+    Args:
+        price: Current price.
+        direction: 1=buy, -1=sell.
+        trade_size_usd: Trade size in USD.
+        adv_usd: Average daily volume in USD.
+        volatility: Daily volatility (std of returns).
+        eta: Impact elasticity (0.3-0.8, default 0.5).
+
+    Returns:
+        Execution price after slippage.
+    """
+    if adv_usd <= 0 or volatility <= 0:
+        return price * (1 + direction * SLIPPAGE)
+
+    participation = trade_size_usd / adv_usd
+    impact = eta * volatility * np.sqrt(participation)
+    return price * (1 + direction * impact)
+
+
+# ─────────────────────────────────────────────────────────────
+# Backtester (V36: with sqrt-impact slippage)
 # ─────────────────────────────────────────────────────────────
 def backtest(
     highs: List[float],
@@ -77,7 +119,7 @@ def backtest(
 ) -> Dict[str, Any]:
     """
     Run a simplified backtest over OHLCV data with given parameters.
-    Returns performance metrics: total_pnl, sharpe, win_rate, n_trades.
+    Returns performance metrics: total_pnl, sharpe, win_rate, n_trades, trade_pnls.
     """
     atr_sl = params["atr_sl_mult"]
     atr_tp = params["atr_tp_mult"]
@@ -87,10 +129,20 @@ def backtest(
     trades = []
     position = None  # {"side", "entry", "sl", "tp"}
     
+    # V36: estimate ADV and volatility for sqrt-impact slippage
+    arr_v = np.array(volumes, dtype=np.float64)
+    arr_c = np.array(closes, dtype=np.float64)
+    adv_usd = float(np.mean(arr_v) * np.mean(arr_c)) if len(volumes) > 0 else 0.0
+    if len(arr_c) > 20:
+        rets = np.diff(arr_c[-21:]) / arr_c[-21:-1]
+        daily_vol = float(np.std(rets) * np.sqrt(96))  # 15m bars → daily
+    else:
+        daily_vol = 0.0
+    
     # Need at least 50 bars for indicators to warm up
     warmup = 50
     if len(closes) < warmup + 10:
-        return {"total_pnl": 0, "sharpe": 0, "win_rate": 0, "n_trades": 0}
+        return {"total_pnl": 0, "sharpe": 0, "win_rate": 0, "n_trades": 0, "trade_pnls": []}
 
     for i in range(warmup, len(closes)):
         price = closes[i]
@@ -110,7 +162,7 @@ def backtest(
             if position["side"] == "BUY":
                 if low <= position["sl"]:
                     pnl = (position["sl"] - position["entry"]) / position["entry"] * trade_size
-                    pnl -= (TAKER_FEE + SLIPPAGE) * 2 * trade_size
+                    pnl -= TAKER_FEE * 2 * trade_size  # V36: slippage modeled via sqrt-impact
                     trades.append(pnl)
                     position = None
                     continue
@@ -137,16 +189,18 @@ def backtest(
         # Entry signals (simplified)
         if position is None and atr > 0:
             if rsi < rsi_os:
+                entry_price = sqrt_impact_slippage(price, 1, trade_size, adv_usd, daily_vol)
                 position = {
                     "side": "BUY",
-                    "entry": price,
+                    "entry": entry_price,
                     "sl": price - atr * atr_sl,
                     "tp": price + atr * atr_tp,
                 }
             elif rsi > rsi_ob:
+                entry_price = sqrt_impact_slippage(price, -1, trade_size, adv_usd, daily_vol)
                 position = {
                     "side": "SELL",
-                    "entry": price,
+                    "entry": entry_price,
                     "sl": price + atr * atr_sl,
                     "tp": price - atr * atr_tp,
                 }
@@ -163,7 +217,7 @@ def backtest(
 
     # Metrics
     if not trades:
-        return {"total_pnl": 0, "sharpe": 0, "win_rate": 0, "n_trades": 0}
+        return {"total_pnl": 0, "sharpe": 0, "win_rate": 0, "n_trades": 0, "trade_pnls": []}
 
     total_pnl = sum(trades)
     wins = sum(1 for t in trades if t > 0)
@@ -180,6 +234,7 @@ def backtest(
         "sharpe": round(sharpe, 2),
         "win_rate": round(win_rate * 100, 1),
         "n_trades": len(trades),
+        "trade_pnls": trades,
     }
 
 
@@ -277,6 +332,53 @@ def load_optimal_params(db_path: str = DB_PATH) -> Dict[str, float]:
 
 
 # ─────────────────────────────────────────────────────────────
+# Validation Results Persistence
+# ─────────────────────────────────────────────────────────────
+
+def _save_validation_results(
+    mc: Dict[str, Any], bs: Dict[str, Any], wf: Dict[str, Any],
+    db_path: str = DB_PATH,
+) -> None:
+    """Save validation results to state.db for historical tracking."""
+    try:
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS validation_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                p_value_sharpe REAL,
+                sharpe_ci_lower REAL,
+                sharpe_ci_upper REAL,
+                prob_positive REAL,
+                consistency_rate REAL,
+                n_trades INTEGER
+            )
+        """)
+        now = datetime.now(timezone.utc).isoformat()
+        c.execute(
+            """INSERT INTO validation_results
+               (timestamp, p_value_sharpe, sharpe_ci_lower, sharpe_ci_upper,
+                prob_positive, consistency_rate, n_trades)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                now,
+                mc.get("p_value_sharpe", 1.0),
+                bs.get("ci_lower", 0.0),
+                bs.get("ci_upper", 0.0),
+                bs.get("prob_positive", 0.0),
+                wf.get("consistency_rate", 0.0) if not wf.get("skipped") else None,
+                mc.get("n_trades", 0),
+            ),
+        )
+        conn.commit()
+        conn.close()
+        logger.info("💾 Validation results saved to %s", db_path)
+    except Exception as e:
+        logger.warning("⚠️ Failed to save validation results: %s", e)
+
+
+# ─────────────────────────────────────────────────────────────
 # CLI Entry Point
 # ─────────────────────────────────────────────────────────────
 async def run_optimization(window_days: int = 30, dry_run: bool = False):
@@ -284,7 +386,7 @@ async def run_optimization(window_days: int = 30, dry_run: bool = False):
     from provider import BinanceProvider
     
     logger.info("=" * 60)
-    logger.info("  HUNTER V34 — Walk-Forward Optimizer")
+    logger.info("  HUNTER V36 — Walk-Forward Optimizer")
     logger.info("  Window: %d days | Dry Run: %s", window_days, dry_run)
     logger.info("=" * 60)
 
@@ -307,6 +409,47 @@ async def run_optimization(window_days: int = 30, dry_run: bool = False):
         if not best_params:
             logger.error("❌ Optimization failed — no valid parameters found.")
             return
+
+        # ── V36: Statistical Validation ──────────────────────────
+        trade_pnls = test_metrics.get("trade_pnls", [])
+        if trade_pnls:
+            logger.info("🔬 Running statistical validation on %d OOS trades...", len(trade_pnls))
+            validation = validate_strategy(
+                trade_pnls=trade_pnls,
+                initial_capital=TRADE_SIZE_USD * 10,
+                trade_size=TRADE_SIZE_USD,
+            )
+
+            mc = validation.get("monte_carlo", {})
+            bs = validation.get("bootstrap_sharpe", {})
+            wf = validation.get("walk_forward", {})
+            ext = validation.get("extended_metrics", {})
+
+            logger.info("📊 Monte Carlo: p-value=%.4f (Sharpe) | Simulated mean=%.2f",
+                        mc.get("p_value_sharpe", 1.0), mc.get("simulated_sharpe_mean", 0))
+            logger.info("📊 Bootstrap:   Sharpe=%.2f [%.2f, %.2f] 95%% CI | P(>0)=%.1f%%",
+                        bs.get("observed_sharpe", 0), bs.get("ci_lower", 0),
+                        bs.get("ci_upper", 0), bs.get("prob_positive", 0) * 100)
+            if not wf.get("skipped"):
+                logger.info("📊 Walk-Fwd:    Consistency=%.0f%% (%d/%d windows profitable)",
+                            wf.get("consistency_rate", 0) * 100,
+                            wf.get("profitable_windows", 0), wf.get("n_windows", 0))
+            logger.info("📊 Extended:    PF=%.2f MaxConsecLoss=%d AvgWin=$%.2f AvgLoss=$%.2f",
+                        ext.get("profit_factor", 0), ext.get("max_consecutive_loss", 0),
+                        ext.get("avg_win", 0), ext.get("avg_loss", 0))
+
+            if not validation["is_significant"]:
+                logger.warning("⚠️ VALIDATION FAILED: %s", validation["reason"])
+                logger.warning("⚠️ Parameters are NOT statistically significant — NOT saving.")
+                if dry_run:
+                    logger.info("🔍 DRY RUN — Would NOT save: %s", best_params)
+                return
+
+            logger.info("✅ VALIDATION PASSED: %s", validation["reason"])
+            # Save validation results to DB
+            _save_validation_results(mc, bs, wf)
+        else:
+            logger.warning("⚠️ No trade PnLs available — skipping validation.")
 
         if dry_run:
             logger.info("🔍 DRY RUN — Parameters NOT saved.")

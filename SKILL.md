@@ -1,73 +1,88 @@
 ---
-name: Hunter Trading Bot (V23)
-description: Institutional-grade crypto trading bot optimized for small capital ($100), featuring ML filtering, limit maker execution, and Order Book Imbalance (OBI) microstructure gating.
+name: hunter
+description: >
+  Institutional-grade crypto futures bot for Binance with SMC analysis,
+  chart pattern detection, statistical validation, VPIN microstructure,
+  funding regime intelligence, and ML filtering (24 features).
+  Optimized for small capital ($100+), maker-only execution.
+category: strategy
 ---
 
-# Hunter Trading Bot (V23)
+# Hunter Trading Bot (V36)
 
-## 📌 Архитектура и Структура
-Hunter — это асинхронный (aiohttp/asyncio) крипто-бот для Binance Futures. Система спроектирована по принципам институционального квант-трейдинга (Mid-Frequency) и оптимизирована для работы с депозитами от $100.
+## Purpose
 
-### Главные особенности V23:
-1. **Maker-ордера (Комиссионный арбитраж):** Вместо `MARKET` ордеров используются строгие `LIMIT` ордера (`timeInForce: GTX` - Post Only) для уменьшения Taker комиссии (0.04%). Бот позиционирует себя на Best Bid / Best Ask с авто-таймаутом (30с).
-2. **Order Book Imbalance (Микроструктура):** Фоновый WS-поток анализирует `bookTicker` (стакан) перед исполнением сделки. Если возникает огромная стена Ask/Bid, сделка блокируется (защита от Toxic Flow).
-3. **ML-фильтрация сделок (Gradient Boosting):** Сборник из 14 фич (включая RSI, ATR, VWAP, Funding Rate, Open Interest) передается в предварительно обученную ML-модель. Сделка совершается только при уверенности (P(profit) > 60%).
-4. **Умный риск-менеджмент:** Kelly criterion для сайзинга, глобальный `MAX_DRAWDOWN_PCT`, Cooldown (Breaker) на рынке после серии убытков (3 лосса) и фильтр флэта (ADX-regime).
+Autonomous crypto futures trading on Binance with an institutional-grade analytics stack adapted from [HKUDS/Vibe-Trading](https://github.com/HKUDS/Vibe-Trading).
 
-### Основные компоненты (Файлы):
-- `main.py`: Ядро приложения. Асинхронный WSS-цикл агрегации данных и принятия решений (Execution Gate).
-- `provider.py` (`BinanceProvider`): Изолированный модуль получения данных. Поддерживает WS `kline` и `bookTicker`, а также REST API для исторической даты, Funding'а и Open Interest.
-- `analysis.py`: Векторная математика, расчет индикаторов (RSI, Divergences, MACD, BB, ATR, VWAP). Выдает нормализованный `MarketState`.
-- `execution.py` / `live_execution.py`: Ядро бумажного и реального трейдинга. Хранит IN-MEMORY позиции, трейлинги, рассчитывает PnL. `LiveTrader` отвечает за подписание API запросов (HMAC) и выставление реальных ордеров.
-- `ml.py`: AI-фильтр на базе `sklearn.GradientBoostingClassifier`. Упаковка вектора состояния и прогноз вероятности прибыльного трейда.
-- `database.py`: Логгер и база SQLite (для истории торгов и подсчета просадок).
-- `config.py`: Единая точка управления всеми гиперпараметрами стратегии.
+## Core Capabilities
 
----
+| Module | Source | Function |
+|--------|--------|----------|
+| `validation.py` | Vibe-Trading `quant-statistics` | Monte Carlo permutation test, Bootstrap Sharpe CI, Walk-Forward consistency |
+| `patterns.py` | Vibe-Trading `harmonic` + `ichimoku` | H&S, double top/bottom, triangles, candlestick, Ichimoku 5-line system |
+| `smc.py` | Vibe-Trading `smc` | BOS/ChoCH/FVG/Order Blocks (via smartmoneyconcepts) |
+| `provider.py` (VPIN) | Vibe-Trading `market-microstructure` | Volume-Sync Probability of Informed Trading |
+| `funding_arb.py` | Vibe-Trading `perp-funding-basis` | Funding regime detection, OI×Funding matrix signal |
+| `optimizer.py` | Vibe-Trading `execution-model` | Almgren-Chriss sqrt-impact slippage model |
+| `ml.py` | Vibe-Trading `factor-research` | 24-feature ML filter with VPIN, pattern, and momentum features |
+| `strategy_router.py` | — | 7-strategy ensemble: Grid, Momentum, MeanRev, FundingArb, StatArb, Pattern, SMC |
 
-## 🚀 Операционное Управление и Запуск
+## Signal Convention
 
-### 1. Подготовка окружения
-Установка всех зависимостей (особенно важен ML-стек):
+- `BUY` / `SHORT` = directional entry (LIMIT maker order)
+- `HOLD` = no action
+- `SELL` / `COVER` = exit existing position
+
+## Dependencies
+
 ```bash
-pip install -r requirements.txt
-# или: pip install aiohttp python-dotenv scikit-learn numpy 
+pip install aiohttp python-dotenv scikit-learn numpy
+# Optional (SMC patterns):
+pip install smartmoneyconcepts pandas
+# Optional (GARCH volatility):
+pip install statsmodels arch
 ```
-В рабочей директории должен присутствовать файл `.env` с ключами:
+
+## Parameters
+
+All parameters are in `config.py`. Key settings:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `TRADE_SIZE_USD` | 10.0 | Position size |
+| `ATR_SL_MULTIPLIER` | 1.5 | Stop-loss × ATR |
+| `ATR_TP_MULTIPLIER` | 2.5 | Take-profit × ATR |
+| `MAX_DRAWDOWN_PCT` | 15.0 | Global drawdown circuit breaker |
+| `LIVE_TRADING` | False | Paper vs live trading |
+| `USE_TESTNET` | True | Testnet vs mainnet |
+
+## Environment
+
 ```env
 BINANCE_API_KEY=your_key
 BINANCE_API_SECRET=your_secret
-LIVE_TRADING=True     # или False для Paper Trading
-USE_TESTNET=True      # или False для Binance Mainnet
+LIVE_TRADING=True
+USE_TESTNET=False
 ```
 
-### 2. Обучение ML-модели (Обязательный шаг!)
-До первого запуска бота, сервер должен скачать исторические данные и подготовить ML-фильтр.
+## Usage
+
 ```bash
+# 1. Train ML model
 python backtest.py --train-ml
+
+# 2. Run optimizer (validates parameters statistically)
+python optimizer.py --window 30
+
+# 3. Start bot
+nohup python3 main.py > bot_live.log 2>&1 &
+tail -f bot_live.log
 ```
-*Результат:* Бот произведет анализ истории, обучит нейросеть (скорость и точность) и сохранит веса в `ml_model.pkl`. Без этого файла бот будет пропускать сделки в слепую!
 
-### 3. Запуск основного цикла
-Бот спроетирован для фоновой работы (24/7). Используйте `tmux`, `screen` или `nohup`:
-```bash
-tmux new -s hunter
-python main.py
-```
-*(Для выхода из `tmux` без прерывания бота нажать `Ctrl+B`, затем `D`)*.
+## Architectural Rules
 
----
-
-## 🛠 Паттерны и Правила (Для Агентов)
-
-При модификации системы Hunter AI агенты **обязаны** следовать следующим правилам:
-- **Никаких `MARKET` ордеров!** Капитал мал. Исполнение на реальной бирже допускается только через методы `LiveTrader.open_limit_order` (Maker fee).
-- **Single Responsibility Principle:** `provider.py` ничего не знает о трейдинге, только про HTTP/WSS. `analysis.py` ничего не знает о заявках, только математика. Формируйте логику в строгих границах модулей!
-- **Zero-Trust к Балансу:** Любые расчеты риска (просадки) должны опираться на `LiveTrader.sync_balance()`, которая забирает чистые данные с биржи, а не на локальные переменные (чтобы исключить ошибки рассогласования).
-- **Drawdown Protection:** Не убирай и не ослабляй Circuit Breakers (предохранители). Серии убыточных сделок убивают мелкие депозиты. `MAX_CONSECUTIVE_LOSSES` и `MAX_DRAWDOWN_PCT` трогать запрещено без веской институциональной математической модели.
-- **Microstructure First:** Перед входом мы всегда чекаем OBI через `provider.get_bbo()`. Если стакан агрессивно против входа, логика должна возвращать сигнал в состояние `HOLD`.
-
-## 📜 Чейнджлог версий (Исторический контекст)
-- `V17`: Асинхронная архитектура и композитные сигналы (RSI Divs + MACD).
-- `V22`: Внедрен ML-Gate (Градиентный бустинг по 12 фичам) и Kelly Criterion.
-- `V23`: Переход на Maker-(Limit)-состояние, WSS bookTicker Imbalance, добавлены Institutional фичи (Funding и Open Interest) на 14-D пространство для ML-модели.
+- **MAKER ONLY**: All execution uses `LIMIT` orders (`GTX` / Post Only)
+- **No pandas in hot path**: Core analysis is pure numpy
+- **Zero-Trust Balance**: All risk uses `sync_balance()` from exchange
+- **Drawdown Protection**: Circuit breakers are immutable
+- **Microstructure First**: OBI + VPIN gate before every entry

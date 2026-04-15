@@ -52,6 +52,67 @@ class BinanceProvider:
         logger.info("📡 BinanceProvider initialized (Testnet: %s, WSS: %s)", USE_TESTNET, self.wss_base)
         self.last_price_cache: Dict[str, float] = {}  # V32: Tick-level price tracking
         self.volume_profile: Dict[str, Dict[float, float]] = {}  # V33: VPVR histogram
+        self.vpin_cache: Dict[str, float] = {}  # V36: VPIN cache
+
+    def compute_vpin(
+        self,
+        closes: List[float],
+        volumes: List[float],
+        n_buckets: int = 50,
+    ) -> float:
+        """
+        V36: Compute VPIN (Volume-Synchronized Probability of Informed Trading).
+        
+        Adapted from Vibe-Trading market-microstructure skill.
+        Uses Bulk Volume Classification (BVC) on kline data as proxy.
+        
+        VPIN < 0.3 -> normal, low informed-trading share
+        VPIN 0.3-0.5 -> caution
+        VPIN > 0.5 -> dangerous, high informed trading probability
+        
+        Returns:
+            VPIN value between 0 and 1.
+        """
+        import numpy as np
+        
+        if len(closes) < n_buckets + 1 or len(volumes) < n_buckets + 1:
+            return 0.0
+        
+        # Compute returns
+        c = np.array(closes, dtype=np.float64)
+        v = np.array(volumes, dtype=np.float64)
+        returns = np.diff(c) / np.where(c[:-1] > 0, c[:-1], 1.0)
+        vol = v[1:]  # Align with returns
+        
+        # Rolling std for BVC normalization
+        if len(returns) < 20:
+            return 0.0
+        std = np.std(returns[-20:])
+        if std < 1e-10:
+            return 0.0
+        
+        # Bulk Volume Classification: buy_vol = V * Φ(ΔP/σ)
+        # Using approximation of standard normal CDF
+        z = returns / std
+        # Approximate Φ(z) using tanh
+        phi = 0.5 * (1.0 + np.tanh(z * 0.7978845608))
+        
+        buy_vol = vol * phi
+        sell_vol = vol * (1.0 - phi)
+        
+        # Order imbalance per bucket (use last n_buckets bars)
+        n = min(len(buy_vol), n_buckets)
+        bv = buy_vol[-n:]
+        sv = sell_vol[-n:]
+        total_vol = bv + sv
+        
+        oi = np.abs(bv - sv)
+        total = np.sum(total_vol)
+        if total < 1e-10:
+            return 0.0
+        
+        vpin = float(np.sum(oi) / total)
+        return round(min(1.0, max(0.0, vpin)), 4)
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession(

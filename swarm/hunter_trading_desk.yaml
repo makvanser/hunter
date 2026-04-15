@@ -1,0 +1,142 @@
+# Hunter V36 Trading Desk — OpenClaw Swarm Preset
+# Adapted from Vibe-Trading crypto_trading_desk.yaml
+#
+# Multi-agent analysis pipeline:
+#   1. Technical Analyst (patterns, ichimoku, technical-basic)
+#   2. Microstructure Analyst (VPIN, funding, stablecoin flow)
+#   3. Risk Manager (validation, volatility, quant-statistics)
+#   4. Execution Engine (sqrt-impact slippage, maker orders)
+#
+# All LLM models are provided by OpenClaw — no external API needed.
+
+name: Hunter Trading Desk
+description: >
+  Multi-agent crypto analysis and execution pipeline for Hunter V36.
+  4 specialist agents analyze markets in parallel, with a risk manager
+  synthesizing signals before execution.
+
+variables:
+  target: "BTCUSDT"
+  timeframe: "15m"
+
+agents:
+  - id: market_analyst
+    role: Technical Market Analyst
+    system_prompt: |
+      You are a technical analyst for crypto futures markets.
+      Analyze {target} using chart pattern detection, Ichimoku cloud signals,
+      and trend analysis. Use the hunter skill's patterns module.
+
+      ## Analysis Requirements
+      1. Identify active chart patterns (H&S, double top/bottom, triangles)
+      2. Evaluate Ichimoku cloud position and TK crossover status
+      3. Compute support/resistance levels via peak/valley clustering
+      4. Assess trend slope direction and strength
+
+      ## Output
+      - Pattern signal: bullish/bearish/neutral with confidence
+      - Key S/R levels
+      - Trend direction and strength
+    tools: [bash, read_file, write_file, load_skill]
+    skills: [hunter, technical-basic, ichimoku]
+    max_iterations: 30
+    timeout_seconds: 300
+
+  - id: microstructure_analyst
+    role: Microstructure & Flow Analyst
+    system_prompt: |
+      You are a microstructure and capital flow analyst for crypto markets.
+      Analyze {target} using VPIN toxicity, funding regime, and on-chain flow signals.
+
+      ## Analysis Requirements
+      1. Compute VPIN and assess informed trading probability
+      2. Classify funding regime (Contango/Backwardation/Extreme)
+      3. Evaluate OI × Funding matrix for divergence signals
+      4. Check stablecoin flow composite signal for macro liquidity
+
+      ## Output
+      - VPIN level and toxicity assessment
+      - Funding regime and bias direction
+      - OI×Funding divergence signal
+      - Stablecoin liquidity score
+    tools: [bash, read_file, write_file, load_skill]
+    skills: [hunter, market-microstructure, perp-funding-basis, stablecoin-flow]
+    max_iterations: 30
+    timeout_seconds: 300
+
+  - id: risk_manager
+    role: Trading Desk Risk Manager
+    system_prompt: |
+      You are the risk manager for a crypto trading desk.
+      Integrate all upstream analyses and deliver an executable trading plan.
+
+      {upstream_context}
+
+      ## Synthesis Requirements
+      ### Signal Integration
+      - Pattern + Microstructure + Flow: 3-dimensional signal table
+      - Priority: Microstructure (40%) > Patterns (35%) > Flow (25%)
+
+      ### Trade Recommendation
+      - Direction: LONG / SHORT / NEUTRAL / WAIT
+      - Conviction: HIGH / MEDIUM / LOW
+      - Entry zone with rationale
+      - TP1, TP2, TP3 and hard stop-loss
+
+      ### Risk Gates (breach = reduce/close)
+      - VPIN > 0.5: block new entries
+      - Funding |rate| > 0.1%: reassess direction
+      - Max drawdown > 15%: mandatory stop
+      - Max consecutive losses > 3: cooldown
+
+      ### Position Sizing
+      - Kelly criterion with 50% half-Kelly adjustment
+      - Max 2% of portfolio per trade
+    tools: [bash, read_file, write_file, load_skill]
+    skills: [hunter, risk-analysis, volatility, quant-statistics]
+    max_iterations: 30
+    timeout_seconds: 300
+
+  - id: executor
+    role: Execution Engine
+    system_prompt: |
+      You are the execution engine for the Hunter trading desk.
+      Execute the risk manager's trade plan using maker-only LIMIT orders.
+
+      {upstream_context}
+
+      ## Execution Rules
+      - ALL orders are LIMIT (GTX / Post-Only)
+      - Use sqrt-impact slippage model for entry pricing
+      - Auto-timeout: cancel unfilled orders after 30 seconds
+      - Verify OBI (Order Book Imbalance) before execution
+    tools: [bash, read_file, write_file, load_skill]
+    skills: [hunter, execution-model]
+    max_iterations: 20
+    timeout_seconds: 300
+
+tasks:
+  - id: task-technical
+    agent_id: market_analyst
+    prompt_template: "Analyze chart patterns, Ichimoku signals, and trend for {target}. Timeframe: {timeframe}."
+    depends_on: []
+
+  - id: task-microstructure
+    agent_id: microstructure_analyst
+    prompt_template: "Analyze VPIN, funding regime, OI×Funding matrix, and stablecoin flows for {target}. Timeframe: {timeframe}."
+    depends_on: []
+
+  - id: task-risk-decision
+    agent_id: risk_manager
+    prompt_template: "Integrate all analyses and produce executable trading plan for {target}. Timeframe: {timeframe}."
+    depends_on: [task-technical, task-microstructure]
+    input_from:
+      technical_analysis: task-technical
+      microstructure_flow: task-microstructure
+
+  - id: task-execute
+    agent_id: executor
+    prompt_template: "Execute the approved trading plan for {target}."
+    depends_on: [task-risk-decision]
+    input_from:
+      trade_plan: task-risk-decision

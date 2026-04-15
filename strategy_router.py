@@ -1,16 +1,30 @@
 """
-Hunter V27 — Strategy Router
+Hunter V36 — Strategy Router
 ==============================
 Multi-strategy ensemble. Evaluates multiple independent trading
 strategies in parallel and selects the best one based on current
 market regime and signal strength.
+
+V36: Added PatternStrategy (chart patterns + Ichimoku) and
+     SMCStrategy (Smart Money Concepts) from Vibe-Trading analytics.
 """
 
 import logging
 from typing import Dict, Any, Tuple, List, Optional
 from analysis import MarketState
+from patterns import get_pattern_signal, compute_ichimoku
+from smc import SMCAnalyzer
 
 logger = logging.getLogger("hunter.strategy")
+
+# Lazy-initialized SMC analyzer (requires pandas + smartmoneyconcepts)
+_smc_analyzer: Optional[SMCAnalyzer] = None
+
+def _get_smc_analyzer() -> SMCAnalyzer:
+    global _smc_analyzer
+    if _smc_analyzer is None:
+        _smc_analyzer = SMCAnalyzer(swing_length=10)
+    return _smc_analyzer
 
 
 class BaseStrategy:
@@ -164,9 +178,67 @@ class StatArbStrategy(BaseStrategy):
         return action, conf
 
 
+class PatternStrategy(BaseStrategy):
+    """
+    V36: Chart pattern detection strategy.
+    Uses H&S, double top/bottom, triangles, candlestick, and Ichimoku.
+    Best in trending regimes where structural patterns are more reliable.
+    """
+    name = "Pattern"
+    best_regimes = ["TRENDING", "STRONG_UP", "STRONG_DOWN"]
+
+    def evaluate(self, state: MarketState, current_position: Optional[str] = None) -> Tuple[str, float]:
+        action = "HOLD"
+        conf = 0.0
+
+        # Use pattern_signal from MarketState if available (set by main.py)
+        pattern_score = getattr(state, 'pattern_signal', 0)
+        if pattern_score == 0:
+            return action, conf
+
+        if pattern_score > 0:
+            action = "BUY"
+            conf = min(1.0, abs(pattern_score) * 0.8 + 0.3)
+        elif pattern_score < 0:
+            action = "SHORT"
+            conf = min(1.0, abs(pattern_score) * 0.8 + 0.3)
+
+        return action, conf
+
+
+class SMCStrategy(BaseStrategy):
+    """
+    V36: Smart Money Concepts strategy.
+    Uses BOS/ChoCH/FVG/Order Blocks for institutional flow detection.
+    Best in trending regimes where institutional footprints are clearest.
+    """
+    name = "SMC"
+    best_regimes = ["TRENDING", "STRONG_UP", "STRONG_DOWN"]
+
+    def evaluate(self, state: MarketState, current_position: Optional[str] = None) -> Tuple[str, float]:
+        action = "HOLD"
+        conf = 0.0
+
+        # Use smc_signal from MarketState if available (set by main.py)
+        smc_signal = getattr(state, 'smc_signal', 0)
+        if smc_signal == 0:
+            return action, conf
+
+        if smc_signal > 0:
+            action = "BUY"
+            conf = 0.65  # SMC signals are high-conviction but rare
+        elif smc_signal < 0:
+            action = "SHORT"
+            conf = 0.65
+
+        return action, conf
+
+
 class StrategyRouter:
     """
-    Evaluates all registered strategies and selects the best signal.
+    V36: Evaluates all registered strategies and selects the best signal.
+    Includes 7 strategies: Grid, Momentum, MeanReversion, FundingArb,
+    StatArb, Pattern (V36), and SMC (V36).
     """
     def __init__(self):
         self.strategies: List[BaseStrategy] = [
@@ -174,7 +246,9 @@ class StrategyRouter:
             MomentumStrategy(),
             MeanReversionStrategy(),
             FundingArbStrategy(),
-            StatArbStrategy()
+            StatArbStrategy(),
+            PatternStrategy(),
+            SMCStrategy(),
         ]
         self.min_confidence = 0.50
 

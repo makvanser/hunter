@@ -103,6 +103,11 @@ class MarketState:
     cvd_slope: float = 0.0
     bid_ask_spread: float = 0.0
     kalman_zscore: float = 0.0
+    # V36: Pattern & SMC signals
+    pattern_signal: float = 0.0   # -1..1 from patterns.py composite
+    smc_signal: int = 0           # -1, 0, 1 from smc.py
+    vpin: float = 0.0             # Vol-Sync Prob Informed Trading
+    ichimoku_signal: int = 0      # -1, 0, 1 from Ichimoku cloud
 
 
 # ─────────────────────────────────────────────────────────────
